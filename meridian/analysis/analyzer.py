@@ -2065,6 +2065,7 @@ class Analyzer:
       new_data: DataTensors | None = None,
       selected_geos: Sequence[str] | None = None,
       selected_times: Sequence[str] | None = None,
+      media_selected_times: Sequence[str] | Sequence[bool] | None = None,
       aggregate_geos: bool = True,
       aggregate_times: bool = True,
       by_reach: bool = True,
@@ -2103,6 +2104,9 @@ class Analyzer:
         all geos are included.
       selected_times: Optional. Contains a subset of times to include. By
         default, all time periods are included.
+      media_selected_times: Optional list containing either a subset of dates to
+        include or booleans with length equal to the number of time periods in
+        `new_data`, if provided.
       aggregate_geos: If `True`, the expected revenue is summed over all of the
         regions.
       aggregate_times: If `True`, the expected revenue is summed over all of
@@ -2136,6 +2140,7 @@ class Analyzer:
         "use_kpi": use_kpi,
         "batch_size": batch_size,
         "include_non_paid_channels": False,
+        "media_selected_times": media_selected_times,
     }
     # TODO: Switch from PerformanceTensors to DataTensors.
     if new_data is None:
@@ -2211,6 +2216,7 @@ class Analyzer:
       new_data: DataTensors | None = None,
       selected_geos: Sequence[str] | None = None,
       selected_times: Sequence[str] | None = None,
+      media_selected_times: Sequence[str] | Sequence[bool] | None = None,
       aggregate_geos: bool = True,
       aggregate_times: bool = True,
       use_kpi: bool = False,
@@ -2252,6 +2258,9 @@ class Analyzer:
         default, all geos are included.
       selected_times: Optional list containing a subset of times to include. By
         default, all time periods are included.
+      media_selected_times: Optional list containing either a subset of dates to
+        include or booleans with length equal to the number of time periods in
+        `new_data`, if provided.
       aggregate_geos: Boolean. If `True`, the expected revenue is summed over
         all of the regions.
       aggregate_times: Boolean. If `True`, the expected revenue is summed over
@@ -2282,6 +2291,7 @@ class Analyzer:
         "use_kpi": use_kpi,
         "batch_size": batch_size,
         "include_non_paid_channels": False,
+        "media_selected_times": media_selected_times,
     }
     # TODO: Switch from PerformanceTensors to DataTensors.
     if new_data is None:
@@ -2328,6 +2338,7 @@ class Analyzer:
       new_data: DataTensors | None = None,
       selected_geos: Sequence[str] | None = None,
       selected_times: Sequence[str] | None = None,
+      media_selected_times: Sequence[str] | Sequence[bool] | None = None,
       aggregate_geos: bool = True,
       aggregate_times: bool = True,
       batch_size: int = constants.DEFAULT_BATCH_SIZE,
@@ -2363,6 +2374,9 @@ class Analyzer:
         default, all geos are included.
       selected_times: Optional list containing a subset of times to include. By
         default, all time periods are included.
+      media_selected_times: Optional list containing either a subset of dates to
+        include or booleans with length equal to the number of time periods in
+        `new_data`, if provided.
       aggregate_geos: Boolean. If `True`, the expected KPI is summed over all of
         the regions.
       aggregate_times: Boolean. If `True`, the expected KPI is summed over all
@@ -2384,6 +2398,7 @@ class Analyzer:
         new_data=new_data,
         selected_geos=selected_geos,
         selected_times=selected_times,
+        media_selected_times=media_selected_times,
         aggregate_geos=aggregate_geos,
         aggregate_times=aggregate_times,
         batch_size=batch_size,
