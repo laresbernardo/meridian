@@ -1153,10 +1153,13 @@ class DataFrameDataLoader(InputDataLoader):
       dataset = xr.combine_by_coords(
           [dataset, reach_xr, frequency_xr, rf_spend_xr]
       )
-
+          
     if self.coord_to_columns.organic_media is not None:
+      organic_media_column = df_indexed[self.coord_to_columns.organic_media]
+      if isinstance(organic_media_column, pd.Series):
+          organic_media_column = organic_media_column.to_frame()
       organic_media_xr = (
-          df_indexed[self.coord_to_columns.organic_media]
+          organic_media_column
           .stack()
           .rename(constants.ORGANIC_MEDIA)
           .rename_axis([

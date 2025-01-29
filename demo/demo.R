@@ -70,7 +70,7 @@ coord_to_columns <- load$CoordToColumns(
     'Channel3_spend',
     'Channel4_spend'
   ),
-  #organic_media = c('Organic_channel0_impression'),
+  organic_media = c('Organic_channel0_impression'),
   non_media_treatments = c('Promo')
 )
 # Create the dictionaries
