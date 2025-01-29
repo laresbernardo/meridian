@@ -1,10 +1,15 @@
 library(reticulate)
 
-virtualenv_create("r-reticulate")
+virtualenv_create("r-reticulate") 
 use_virtualenv("r-reticulate", required = TRUE)
 
 # Install from local directory to have more control on versions
 py_install("meridian", ignore_installed = FALSE, pip = TRUE)
+
+# # Upgrade pandas to the latest version
+# py_install("pandas", pip = TRUE, upgrade = TRUE)
+# pd <- import("pandas", delay_load = FALSE)
+# pd$`__version__`
 
 # Import libraries
 np <- import("numpy", delay_load = FALSE)
@@ -14,23 +19,26 @@ tfp <- import("tensorflow_probability", delay_load = FALSE)
 az <- import("arviz", delay_load = FALSE)
 meridian <- import("meridian", delay_load = FALSE)
 
-# Import the necessary modules
-constants <- import("meridian.constants")
-load <- import("meridian.data.load")
-test_utils <- import("meridian.data.test_utils")
-model <- import("meridian.model.model")
-spec <- import("meridian.model.spec")
-prior_distribution <- import("meridian.model.prior_distribution")
-optimizer <- import("meridian.analysis.optimizer")
-analyzer <- import("meridian.analysis.analyzer")
-visualizer <- import("meridian.analysis.visualizer")
-summarizer <- import("meridian.analysis.summarizer")
-formatter <- import("meridian.analysis.formatter")
+# Import meridian's modules
+if (TRUE) {
+  constants <- import("meridian.constants")
+  load <- import("meridian.data.load")
+  test_utils <- import("meridian.data.test_utils")
+  model <- import("meridian.model.model")
+  spec <- import("meridian.model.spec")
+  prior_distribution <- import("meridian.model.prior_distribution")
+  optimizer <- import("meridian.analysis.optimizer")
+  analyzer <- import("meridian.analysis.analyzer")
+  visualizer <- import("meridian.analysis.visualizer")
+  summarizer <- import("meridian.analysis.summarizer")
+  formatter <- import("meridian.analysis.formatter") 
+}
 
 # Check if GPU is available
 try(tensorflow::tf_gpu_configured())
 
 ######## STEP 1: LOAD THE DATA
+# Docs: https://developers.google.com/meridian/docs/user-guide/collect-data
 
 # Load (dummy) data to inspect
 csv_path <- "meridian/data/simulated_data/csv/geo_all_channels.csv"
@@ -38,7 +46,6 @@ df <- read.csv(csv_path)
 head(df, 10)
 
 # Map the column names to their corresponding variable types
-# Defs: https://developers.google.com/meridian/docs/user-guide/collect-data
 coord_to_columns <- load$CoordToColumns(
   time = 'time',
   geo = 'geo',
@@ -94,3 +101,75 @@ loader <- load$CsvDataLoader(
 data <- loader$load()
 
 ######## STEP 2: CONFIGURE THE MODEL
+# Docs: https://developers.google.com/meridian/docs/user-guide/configure-model
+
+# Set the ROI prior Mu and Sigma for each media channel
+roi_mu <- 0.2
+roi_sigma <- 0.9
+# Create the Prior Distribution
+prior <- prior_distribution$PriorDistribution(
+  roi_m = tfp$distributions$LogNormal(roi_mu, roi_sigma, name = constants$ROI_M)
+)
+# Create the Model Specification
+model_spec <- spec$ModelSpec(prior = prior)
+# Assuming `data` is already loaded as per your previous steps
+mmm <- model$Meridian(input_data = data, model_spec = model_spec)
+
+## NOTE: If you are using T4 GPU runtime, this step may take about 
+## 10 minutes for the provided demo data set.
+
+# Sample from the prior distribution
+system.time(mmm$sample_prior(500))
+# Sample from the posterior distribution
+system.time(mmm$sample_posterior(
+  n_chains = 7, n_adapt = 500, n_burnin = 500, n_keep = 1000))
+
+######## STEP 3: MODEL DISGNOSTICS
+
+# Assess convergence
+model_diagnostics <- visualizer$ModelDiagnostics(mmm)
+model_diagnostics$plot_rhat_boxplot()
+
+# Assess model's fit
+model_fit <- visualizer$ModelFit(mmm)
+model_fit$plot_model_fit()
+
+# Create Media Summary
+media_summary <- visualizer$MediaSummary(mmm)
+summary_table <- media_summary$summary_table()
+print(summary_table)
+
+######## STEP 4: GENERATE RESULTS & 2-PAGE HTML OUTPUT
+# Docs: https://developers.google.com/meridian/docs/user-guide/generate-model-results-output
+
+# Generate HTML file
+mmm_summarizer <- summarizer$Summarizer(mmm)
+
+# Define file path and dates
+filepath <- '/folder'
+start_date <- '2021-01-25' # min(df$time)
+end_date <- '2024-01-15' # max(df$time)
+
+# Output Model Results Summary
+mmm_summarizer$output_model_results_summary(
+  'summary_output.html', filepath, start_date, end_date)
+
+######## STEP 5: BUDGET OPTIMIZATION REPORT
+# Docs: https://developers.google.com/meridian/docs/user-guide/budget-optimization-scenarios
+
+# Perform Optimization
+budget_optimizer <- optimizer$BudgetOptimizer(mmm)
+optimization_results <- budget_optimizer$optimize()
+
+# Export HTML report
+filepath <- '/folder'
+optimization_results$output_optimization_summary('optimization_output.html', filepath)
+
+######## STEP 6: SAVE AND EXPORT MODEL
+
+# Define file path
+file_path <- '/saved_mmm.pkl'
+# Save Model
+model$save_mmm(mmm, file_path)
+# Load Model
+mmm <- model$load_mmm(file_path)
