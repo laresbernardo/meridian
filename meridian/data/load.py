@@ -1052,8 +1052,11 @@ class DataFrameDataLoader(InputDataLoader):
     dataset = xr.combine_by_coords([kpi_xr, population_xr, controls_xr])
 
     if self.coord_to_columns.non_media_treatments is not None:
+      non_media_column = df_indexed[self.coord_to_columns.non_media_treatments]
+      if isinstance(non_media_column, pd.Series):
+          non_media_column = non_media_column.to_frame()
       non_media_xr = (
-          df_indexed[self.coord_to_columns.non_media_treatments]
+          non_media_column
           .stack()
           .rename(constants.NON_MEDIA_TREATMENTS)
           .rename_axis(

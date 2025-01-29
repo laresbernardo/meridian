@@ -1,15 +1,15 @@
 library(reticulate)
+# install_python(version = '3.11')
+virtualenv_create("r-meridian", version = "3.11")
+use_virtualenv("r-meridian", required = TRUE)
+py_config()
 
-virtualenv_create("r-reticulate") 
-use_virtualenv("r-reticulate", required = TRUE)
-
-# Install from local directory to have more control on versions
+# Install meridian (local dir) and some other deps
 py_install("meridian", ignore_installed = FALSE, pip = TRUE)
-
-# # Upgrade pandas to the latest version
-# py_install("pandas", pip = TRUE, upgrade = TRUE)
-# pd <- import("pandas", delay_load = FALSE)
-# pd$`__version__`
+# py_install("immutabledict", pip = TRUE, upgrade = TRUE)
+# py_install("tf_keras", pip = TRUE, upgrade = TRUE)
+# py_install("joblib", pip = TRUE, upgrade = TRUE)
+# py_install("altair", pip = TRUE, upgrade = TRUE)
 
 # Import libraries
 np <- import("numpy", delay_load = FALSE)
@@ -70,7 +70,7 @@ coord_to_columns <- load$CoordToColumns(
     'Channel3_spend',
     'Channel4_spend'
   ),
-  organic_media = c('Organic_channel0_impression'),
+  #organic_media = c('Organic_channel0_impression'),
   non_media_treatments = c('Promo')
 )
 # Create the dictionaries
@@ -120,7 +120,7 @@ model_spec <- spec$ModelSpec(
   prior = prior,
   media_effects_dist = 'log_normal',
   hill_before_adstock = FALSE,
-  max_lag = 8, # Default: 8. NULL for abs flex
+  max_lag = 8L, # Default: 8. NULL for abs flex
   unique_sigma_for_each_geo = FALSE,
   paid_media_prior_type = 'roi',
   roi_calibration_period = NULL,
@@ -155,7 +155,8 @@ mmm <- model$Meridian(input_data = data, model_spec = model_spec)
 system.time(mmm$sample_prior(500))
 # Sample from the posterior distribution
 system.time(mmm$sample_posterior(
-  n_chains = 7, n_adapt = 500, n_burnin = 500, n_keep = 1000))
+  n_chains = 7L, n_adapt = 500L, 
+  n_burnin = 500L, n_keep = 1000L))
 
 ######## STEP 3: MODEL DISGNOSTICS
 
@@ -169,7 +170,11 @@ model_fit$plot_model_fit()
 
 # Create Media Summary
 media_summary <- visualizer$MediaSummary(mmm)
-summary_table <- media_summary$summary_table()
+summary_table <- media_summary$summary_table(
+  include_prior = TRUE,
+  include_posterior = TRUE,
+  include_non_paid_channels = TRUE
+)
 print(summary_table)
 
 ######## STEP 4: GENERATE RESULTS & 2-PAGE HTML OUTPUT
@@ -179,7 +184,7 @@ print(summary_table)
 mmm_summarizer <- summarizer$Summarizer(mmm)
 
 # Define file path and dates
-filepath <- '/folder'
+filepath <- 'demo'
 start_date <- '2021-01-25' # min(df$time)
 end_date <- '2024-01-15' # max(df$time)
 
@@ -190,19 +195,84 @@ mmm_summarizer$output_model_results_summary(
 ######## STEP 5: BUDGET OPTIMIZATION REPORT
 # Docs: https://developers.google.com/meridian/docs/user-guide/budget-optimization-scenarios
 
+# use_posterior: Boolean. If `True`, then the budget is optimized based on
+# the posterior distribution of the model. Otherwise, the prior
+# distribution is used.
+# selected_times: Tuple containing the start and end time dimension
+# coordinates for the duration to run the optimization on. Selected time
+# values should align with the Meridian time dimension coordinates in the
+# underlying model. By default, all times periods are used. Either start
+# or end time component can be `None` to represent the first or the last
+# time coordinate, respectively.
+# fixed_budget: Boolean indicating whether it's a fixed budget optimization
+# or flexible budget optimization. Defaults to `True`. If `False`, must
+# specify either `target_roi` or `target_mroi`.
+# budget: Number indicating the total budget for the fixed budget scenario.
+# Defaults to the historical budget.
+# pct_of_spend: Numeric list of size `n_total_channels` containing the
+# percentage allocation for spend for all media and RF channels. The order
+# must match `InputData.media` with values between 0-1, summing to 1. By
+# default, the historical allocation is used. Budget and allocation are
+# used in conjunction to determine the non-optimized media-level spend,
+# which is used to calculate the non-optimized performance metrics (for
+# example, ROI) and construct the feasible range of media-level spend with
+# the spend constraints.
+# spend_constraint_lower: Numeric list of size `n_total_channels` or float
+# (same constraint for all channels) indicating the lower bound of
+# media-level spend. The lower bound of media-level spend is `(1 -
+# spend_constraint_lower) * budget * allocation)`. The value must be
+# between 0-1. Defaults to `0.3` for fixed budget and `1` for flexible.
+# spend_constraint_upper: Numeric list of size `n_total_channels` or float
+# (same constraint for all channels) indicating the upper bound of
+# media-level spend. The upper bound of media-level spend is `(1 +
+# spend_constraint_upper) * budget * allocation)`. Defaults to `0.3` for
+# fixed budget and `1` for flexible.
+# target_roi: Float indicating the target ROI constraint. Only used for
+# flexible budget scenarios. The budget is constrained to when the ROI of
+# the total spend hits `target_roi`.
+# target_mroi: Float indicating the target marginal ROI constraint. Only
+# used for flexible budget scenarios. The budget is constrained to when
+# the marginal ROI of the total spend hits `target_mroi`.
+# gtol: Float indicating the acceptable relative error for the budget used
+# in the grid setup. The budget will be rounded by `10*n`, where `n` is
+# the smallest integer such that `(budget - rounded_budget)` is less than
+# or equal to `(budget * gtol)`. `gtol` must be less than 1.
+# use_optimal_frequency: If `True`, uses `optimal_frequency` calculated by
+# trained Meridian model for optimization. If `False`, uses historical
+# frequency.
+# confidence_level: The threshold for computing the confidence intervals.
+# batch_size: Maximum draws per chain in each batch. The calculation is run
+# in batches to avoid memory exhaustion. If a memory error occurs, try
+# reducing `batch_size`. The calculation will generally be faster with
+# larger `batch_size` values.
+
 # Perform Optimization
 budget_optimizer <- optimizer$BudgetOptimizer(mmm)
-optimization_results <- budget_optimizer$optimize()
+optimization_results <- budget_optimizer$optimize(
+  use_posterior = TRUE,
+  selected_times = NULL,
+  fixed_budget = TRUE,
+  budget = NULL,
+  pct_of_spend = NULL,
+  spend_constraint_lower = 0.5,
+  spend_constraint_upper = 2,
+  target_roi = NULL,
+  target_mroi = NULL
+)
+# Plot results
+optimization_results$plot_budget_allocation(optimized = TRUE)
+optimization_results$plot_response_curves(n_top_channels = 3L)
 
 # Export HTML report
-filepath <- '/folder'
-optimization_results$output_optimization_summary('optimization_output.html', filepath)
+filepath <- 'demo'
+optimization_results$output_optimization_summary(
+  'optimization_output.html', filepath)
 
 ######## STEP 6: SAVE AND EXPORT MODEL
 
 # Define file path
-file_path <- '/saved_mmm.pkl'
+file_path <- 'demo/saved_mmm.pkl'
 # Save Model
 model$save_mmm(mmm, file_path)
 # Load Model
-mmm <- model$load_mmm(file_path)
+mmm2 <- model$load_mmm(file_path)
