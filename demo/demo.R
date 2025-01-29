@@ -35,7 +35,10 @@ if (TRUE) {
 }
 
 # Check if GPU is available
-try(tensorflow::tf_gpu_configured())
+try({
+  suppressPackageStartupMessages(library(tensorflow))
+  tf_gpu_configured()
+})
 
 ######## STEP 1: LOAD THE DATA
 # Docs: https://developers.google.com/meridian/docs/user-guide/collect-data
@@ -104,19 +107,49 @@ data <- loader$load()
 # Docs: https://developers.google.com/meridian/docs/user-guide/configure-model
 
 # Set the ROI prior Mu and Sigma for each media channel
-roi_mu <- 0.2
-roi_sigma <- 0.9
+roi_mu <- c(0.2, 0.3, 0.4, 0.3, 0.3)
+roi_sigma <- c(0.7, 0.9, 0.6, 0.7, 0.6)
 # Create the Prior Distribution
 prior <- prior_distribution$PriorDistribution(
   roi_m = tfp$distributions$LogNormal(roi_mu, roi_sigma, name = constants$ROI_M)
 )
 # Create the Model Specification
-model_spec <- spec$ModelSpec(prior = prior)
+n_times <- length(unique(df$time))
+knots <- round(0.8 * n_times)
+model_spec <- spec$ModelSpec(
+  prior = prior,
+  media_effects_dist = 'log_normal',
+  hill_before_adstock = FALSE,
+  max_lag = 8, # Default: 8. NULL for abs flex
+  unique_sigma_for_each_geo = FALSE,
+  paid_media_prior_type = 'roi',
+  roi_calibration_period = NULL,
+  rf_roi_calibration_period = NULL,
+  knots = knots, # to control for seasonality. 1 for intercept only, max is number of periods
+  baseline_geo = NULL,
+  holdout_id = NULL,
+  control_population_scaling_id = NULL)
 # Assuming `data` is already loaded as per your previous steps
 mmm <- model$Meridian(input_data = data, model_spec = model_spec)
 
 ## NOTE: If you are using T4 GPU runtime, this step may take about 
 ## 10 minutes for the provided demo data set.
+
+# n_chains: The number of chains to be sampled in parallel. 
+# To reduce memory consumption, you can use a list of integers to allow for sequential 
+# MCMC sampling calls. Given a list, each element in the sequence corresponds to the 
+# n_chains argument for a call to windowed_adaptive_nuts.
+#
+# n_adapt: The number of MCMC draws per chain, during which step size and kernel 
+# are adapted. These draws are always excluded.
+# 
+# n_burnin: An additional number of MCMC draws, per chain, to be excluded after 
+# the step size and kernel are fixed. These additional draws may be needed to ensure 
+# that all chains reach the stationary distribution after adaptation is completed, 
+# but in practice we often find that the chains reach the stationary distribution 
+# during adaptation and that n_burnin=0 is sufficient.
+# 
+# n_keep: The number of MCMC draws, per chain, to keep for the model analysis and results.
 
 # Sample from the prior distribution
 system.time(mmm$sample_prior(500))
