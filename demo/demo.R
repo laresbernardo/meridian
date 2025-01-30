@@ -1,15 +1,24 @@
 library(reticulate)
+# system("git config --global http.sslVerify false")
 # install_python(version = '3.11')
-virtualenv_create("r-meridian", version = "3.11")
-use_virtualenv("r-meridian", required = TRUE)
+venv <- "r-meridian"
+virtualenv_create(venv, version = "3.11")
+use_virtualenv(venv, required = TRUE)
 py_config()
 
 # Install meridian (local dir) and some other deps
-py_install("meridian", ignore_installed = FALSE, pip = TRUE)
+# py_install("arviz", pip = TRUE, upgrade = TRUE)
+# py_install("numpy==1.26", ignore_installed = FALSE, pip = TRUE)
+# py_install("pandas==1.5.3", pip = TRUE, upgrade = TRUE)
+# py_install("scipy==1.12.0", pip = TRUE, upgrade = TRUE)
+# py_install("tensorflow==2.16.1", pip = TRUE, upgrade = TRUE)
+# py_install("tf_keras==2.16.0", pip = TRUE, upgrade = TRUE)
+# py_install("tensorflow-probability==0.24", pip = TRUE, upgrade = TRUE)
+# py_install("keras==3.0.0", pip = TRUE, upgrade = TRUE)
 # py_install("immutabledict", pip = TRUE, upgrade = TRUE)
-# py_install("tf_keras", pip = TRUE, upgrade = TRUE)
 # py_install("joblib", pip = TRUE, upgrade = TRUE)
-# py_install("altair", pip = TRUE, upgrade = TRUE)
+# py_install("altair==4.2.0", pip = TRUE, upgrade = TRUE)
+py_install("meridian", ignore_installed = FALSE, pip = TRUE)
 
 # Import libraries
 np <- import("numpy", delay_load = FALSE)
@@ -37,6 +46,7 @@ if (TRUE) {
 # Check if GPU is available
 try({
   suppressPackageStartupMessages(library(tensorflow))
+  Sys.sleep(2)
   tf_gpu_configured()
 })
 
