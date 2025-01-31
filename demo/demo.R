@@ -170,13 +170,21 @@ system.time(mmm$sample_posterior(
 
 ######## STEP 3: MODEL DISGNOSTICS
 
+if (FALSE) {
+  library(altair)
+  library(rsvg)
+  p <- model_diagnostics$plot_prior_and_posterior_distribution()
+  altair::vw_write_png(p, "demo/test.png")
+}
+
 # Assess convergence
 model_diagnostics <- visualizer$ModelDiagnostics(mmm)
 model_diagnostics$plot_rhat_boxplot()
+model_diagnostics$predictive_accuracy_table()
 
 # Assess model's fit
 model_fit <- visualizer$ModelFit(mmm)
-model_fit$plot_model_fit()
+model_fit_data <- model_fit$model_fit_data$to_dict()
 
 # Create Media Summary
 media_summary <- visualizer$MediaSummary(mmm)
