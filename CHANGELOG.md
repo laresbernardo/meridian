@@ -23,6 +23,8 @@ To release a new version (e.g. from `1.0.0` -> `2.0.0`):
 
 ## [Unreleased]
 
+*   Fix `spend_share` in `ReachFrequencyOptimizationProcessor` output, which
+    was reported as a percentage instead of a fraction of the total spend.
 *   `Analyzer.expected_vs_actual_data` now always returns an `evaluation_set`
     dimension on the `expected` and `baseline` data variables. It contains
     `['All Data']` when the data is not split by `holdout_id`, and
