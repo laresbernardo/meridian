@@ -23,6 +23,12 @@ To release a new version (e.g. from `1.0.0` -> `2.0.0`):
 
 ## [Unreleased]
 
+*   `Analyzer.expected_vs_actual_data` now always returns an `evaluation_set`
+    dimension on the `expected` and `baseline` data variables. It contains
+    `['All Data']` when the data is not split by `holdout_id`, and
+    `['Train', 'Test', 'All Data']` when it is. Use
+    `.sel(evaluation_set='All Data')` to get the previous unsplit shape.
+    `ModelFit.model_fit_data` is unchanged.
 *   Fix `contribution_n` priors for population-scaled non-media channels with a
     nonzero baseline value. The baseline was divided by population twice when
     converting `contribution_n` to `gamma_n`, so `contribution_n` did not match
