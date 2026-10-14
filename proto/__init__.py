@@ -13,4 +13,7 @@
 # limitations under the License.
 
 """Module for MMM Proto Schema."""
+
+# TODO: Remove `__version__` or read it from the package metadata.
+# `pyproject.toml` sets the package version, so this value is stale.
 __version__ = "1.0.0"
