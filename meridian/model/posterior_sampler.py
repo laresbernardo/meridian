@@ -205,6 +205,110 @@ def _get_tau_g(
   return backend.tfd.Deterministic(tau_g, name="tau_g")
 
 
+def _sample_controls(
+    model_context: context.ModelContext,
+    yield_deterministics: bool,
+) -> Generator[backend.tfd.Distribution, Any, backend.Tensor | None]:
+  """Samples the control coefficients in the joint distribution.
+
+  When delegated to via `yield from`, returns the geo-level control coefficients
+  `gamma_gc`, or `None` if the model has no control variables.
+
+  Args:
+    model_context: An instance of `context.ModelContext` containing model data
+      and settings.
+    yield_deterministics: If True, also yields `gamma_gc` as a
+      `backend.tfd.Deterministic` distribution.
+
+  Yields:
+    The distributions of the control parameters.
+  """
+  # Omit gamma_c, xi_c, and gamma_gc from joint distribution output if
+  # there are no control variables in the model.
+  if not model_context.n_controls:
+    return None
+  prior_broadcast = model_context.prior_broadcast
+  gamma_c = yield prior_broadcast.gamma_c
+  xi_c = yield prior_broadcast.xi_c
+  gamma_gc_dev = yield backend.tfd.Sample(
+      backend.tfd.Normal(
+          loc=backend.to_tensor(0.0, dtype=backend.float_dtype),
+          scale=backend.to_tensor(1.0, dtype=backend.float_dtype),
+      ),
+      [model_context.n_geos, model_context.n_controls],
+      name=constants.GAMMA_GC_DEV,
+  )
+  gamma_gc = gamma_c + xi_c * gamma_gc_dev
+  if yield_deterministics:
+    yield backend.tfd.Deterministic(gamma_gc, name=constants.GAMMA_GC)
+  return gamma_gc
+
+
+def _sample_non_media_treatments(
+    model_context: context.ModelContext,
+    model_equations: equations.ModelEquations,
+    yield_deterministics: bool,
+) -> Generator[backend.tfd.Distribution, Any, backend.Tensor | None]:
+  """Samples the non-media treatment coefficients in the joint distribution.
+
+  When delegated to via `yield from`, returns the geo-level non-media treatment
+  coefficients `gamma_gn`, or `None` if the model has no non-media treatments.
+
+  Args:
+    model_context: An instance of `context.ModelContext` containing model data
+      and settings.
+    model_equations: An instance of `equations.ModelEquations` providing the
+      model's mathematical equations.
+    yield_deterministics: If True, also yields the derived coefficients as
+      `backend.tfd.Deterministic` distributions.
+
+  Yields:
+    The distributions of the non-media treatment parameters.
+  """
+  if model_context.non_media_treatments is None:
+    return None
+  prior_broadcast = model_context.prior_broadcast
+  xi_n = yield prior_broadcast.xi_n
+  gamma_gn_dev = yield backend.tfd.Sample(
+      backend.tfd.Normal(
+          loc=backend.to_tensor(0.0, dtype=backend.float_dtype),
+          scale=backend.to_tensor(1.0, dtype=backend.float_dtype),
+      ),
+      [model_context.n_geos, model_context.n_non_media_channels],
+      name=constants.GAMMA_GN_DEV,
+  )
+  prior_type = model_context.model_spec.non_media_treatments_prior_type
+  if prior_type == constants.TREATMENT_PRIOR_TYPE_COEFFICIENT:
+    gamma_n = yield prior_broadcast.gamma_n
+  elif prior_type == constants.TREATMENT_PRIOR_TYPE_CONTRIBUTION:
+    contribution_n = yield prior_broadcast.contribution_n
+    incremental_outcome_n = contribution_n * model_context.total_outcome
+    # The baseline values are already population-scaled.
+    baseline_scaled = model_context.non_media_transformer.forward(  # pyrefly: ignore[missing-attribute]
+        model_equations.compute_non_media_treatments_baseline(),
+        apply_population_scaling=False,
+    )
+    linear_predictor_counterfactual_difference = (
+        model_context.non_media_treatments_normalized - baseline_scaled
+    )
+    gamma_n = model_equations.calculate_beta_x(
+        is_non_media=True,
+        incremental_outcome_x=incremental_outcome_n,
+        linear_predictor_counterfactual_difference=linear_predictor_counterfactual_difference,
+        eta_x=xi_n,
+        beta_gx_dev=gamma_gn_dev,
+    )
+    if yield_deterministics:
+      yield backend.tfd.Deterministic(gamma_n, name=constants.GAMMA_N)
+  else:
+    raise ValueError(f"Unsupported prior type: {prior_type}")
+
+  gamma_gn = gamma_n + xi_n * gamma_gn_dev
+  if yield_deterministics:
+    yield backend.tfd.Deterministic(gamma_gn, name=constants.GAMMA_GN)
+  return gamma_gn
+
+
 def _joint_dist_base_logic(
     model_context: context.ModelContext,
     model_equations: equations.ModelEquations,
@@ -264,9 +368,7 @@ def _joint_dist_base_logic(
   gamma_gc = None
   gamma_gn = None
 
-  # TODO
-  if not model_context.model_spec.allows_negative_aggregate_baseline:
-    assert baseline_constraint is not None
+  if baseline_constraint is not None:
     # 1. Sample sigma and tau_g
     sigma = yield prior_broadcast.sigma
     tau_g_excl_baseline = yield backend.tfd.Sample(
@@ -278,20 +380,8 @@ def _joint_dist_base_logic(
       yield backend.tfd.Deterministic(tau_g, name="tau_g")
 
     # 2. Controls
-    if n_controls:
-      gamma_c = yield prior_broadcast.gamma_c
-      xi_c = yield prior_broadcast.xi_c
-      gamma_gc_dev = yield backend.tfd.Sample(
-          backend.tfd.Normal(
-              loc=backend.to_tensor(0.0, dtype=backend.float_dtype),
-              scale=backend.to_tensor(1.0, dtype=backend.float_dtype),
-          ),
-          [n_geos, n_controls],
-          name=constants.GAMMA_GC_DEV,
-      )
-      gamma_gc = gamma_c + xi_c * gamma_gc_dev
-      if yield_deterministics:
-        yield backend.tfd.Deterministic(gamma_gc, name=constants.GAMMA_GC)
+    gamma_gc = yield from _sample_controls(model_context, yield_deterministics)
+    if gamma_gc is not None:
       controls_offset = backend.einsum(
           "gc,...gc->...",
           baseline_constraint.controls_weights,
@@ -301,51 +391,13 @@ def _joint_dist_base_logic(
       controls_offset = backend.to_tensor(0.0, dtype=backend.float_dtype)
 
     # 3. Non-media treatments
+    gamma_gn = yield from _sample_non_media_treatments(
+        model_context, model_equations, yield_deterministics
+    )
     if (
-        model_context.non_media_treatments is not None
+        gamma_gn is not None
         and model_context.non_media_transformer is not None
     ):
-      xi_n = yield prior_broadcast.xi_n
-      gamma_gn_dev = yield backend.tfd.Sample(
-          backend.tfd.Normal(
-              loc=backend.to_tensor(0.0, dtype=backend.float_dtype),
-              scale=backend.to_tensor(1.0, dtype=backend.float_dtype),
-          ),
-          [n_geos, n_non_media_channels],
-          name=constants.GAMMA_GN_DEV,
-      )
-      prior_type = model_context.model_spec.non_media_treatments_prior_type
-      if prior_type == constants.TREATMENT_PRIOR_TYPE_COEFFICIENT:
-        gamma_n = yield prior_broadcast.gamma_n
-      elif prior_type == constants.TREATMENT_PRIOR_TYPE_CONTRIBUTION:
-        contribution_n = yield prior_broadcast.contribution_n
-        incremental_outcome_n = contribution_n * total_outcome
-        # The baseline values are already population-scaled.
-        baseline_scaled = model_context.non_media_transformer.forward(
-            model_equations.compute_non_media_treatments_baseline(),
-            apply_population_scaling=False,
-        )
-        linear_predictor_counterfactual_difference = (
-            non_media_treatments_normalized - baseline_scaled
-        )
-        gamma_n = model_equations.calculate_beta_x(
-            is_non_media=True,
-            incremental_outcome_x=incremental_outcome_n,
-            linear_predictor_counterfactual_difference=(
-                linear_predictor_counterfactual_difference
-            ),
-            eta_x=xi_n,
-            beta_gx_dev=gamma_gn_dev,
-        )
-        if yield_deterministics:
-          yield backend.tfd.Deterministic(gamma_n, name=constants.GAMMA_N)
-      else:
-        raise ValueError(f"Unsupported prior type: {prior_type}")
-
-      gamma_gn = gamma_n + xi_n * gamma_gn_dev
-      if yield_deterministics:
-        yield backend.tfd.Deterministic(gamma_gn, name=constants.GAMMA_GN)
-
       non_media_baseline = (
           model_equations.compute_non_media_treatments_baseline()
       )
@@ -1005,67 +1057,16 @@ def _joint_dist_base_logic(
   else:
     y_pred_combined_media = tau_gt
 
-  # Omit gamma_c, xi_c, and gamma_gc from joint distribution output if
-  # there are no control variables in the model.
-  if n_controls:
-    gamma_c = yield prior_broadcast.gamma_c
-    xi_c = yield prior_broadcast.xi_c
-    gamma_gc_dev = yield backend.tfd.Sample(
-        backend.tfd.Normal(
-            loc=backend.to_tensor(0.0, dtype=backend.float_dtype),
-            scale=backend.to_tensor(1.0, dtype=backend.float_dtype),
-        ),
-        [n_geos, n_controls],
-        name=constants.GAMMA_GC_DEV,
-    )
-    gamma_gc = gamma_c + xi_c * gamma_gc_dev
-    if yield_deterministics:
-      yield backend.tfd.Deterministic(gamma_gc, name=constants.GAMMA_GC)
-
+  gamma_gc = yield from _sample_controls(model_context, yield_deterministics)
+  if gamma_gc is not None:
     y_pred_combined_media += backend.einsum(
         "...gtc,...gc->...gt", controls_scaled, gamma_gc
     )
 
-  if model_context.non_media_treatments is not None:
-    xi_n = yield prior_broadcast.xi_n
-    gamma_gn_dev = yield backend.tfd.Sample(
-        backend.tfd.Normal(
-            loc=backend.to_tensor(0.0, dtype=backend.float_dtype),
-            scale=backend.to_tensor(1.0, dtype=backend.float_dtype),
-        ),
-        [n_geos, n_non_media_channels],
-        name=constants.GAMMA_GN_DEV,
-    )
-    prior_type = model_context.model_spec.non_media_treatments_prior_type
-    if prior_type == constants.TREATMENT_PRIOR_TYPE_COEFFICIENT:
-      gamma_n = yield prior_broadcast.gamma_n
-    elif prior_type == constants.TREATMENT_PRIOR_TYPE_CONTRIBUTION:
-      contribution_n = yield prior_broadcast.contribution_n
-      incremental_outcome_n = contribution_n * total_outcome
-      # The baseline values are already population-scaled.
-      baseline_scaled = model_context.non_media_transformer.forward(  # pyrefly: ignore[missing-attribute]
-          model_equations.compute_non_media_treatments_baseline(),
-          apply_population_scaling=False,
-      )
-      linear_predictor_counterfactual_difference = (
-          non_media_treatments_normalized - baseline_scaled
-      )
-      gamma_n = model_equations.calculate_beta_x(
-          is_non_media=True,
-          incremental_outcome_x=incremental_outcome_n,
-          linear_predictor_counterfactual_difference=linear_predictor_counterfactual_difference,
-          eta_x=xi_n,
-          beta_gx_dev=gamma_gn_dev,
-      )
-      if yield_deterministics:
-        yield backend.tfd.Deterministic(gamma_n, name=constants.GAMMA_N)
-    else:
-      raise ValueError(f"Unsupported prior type: {prior_type}")
-
-    gamma_gn = gamma_n + xi_n * gamma_gn_dev
-    if yield_deterministics:
-      yield backend.tfd.Deterministic(gamma_gn, name=constants.GAMMA_GN)
-
+  gamma_gn = yield from _sample_non_media_treatments(
+      model_context, model_equations, yield_deterministics
+  )
+  if gamma_gn is not None:
     y_pred = y_pred_combined_media + backend.einsum(
         "...gtn,...gn->...gt", non_media_treatments_normalized, gamma_gn
     )
