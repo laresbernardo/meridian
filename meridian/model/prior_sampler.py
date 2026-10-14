@@ -569,6 +569,49 @@ class PriorDistributionSampler:
 
     return organic_rf_vars
 
+  def _sample_controls_priors(
+      self,
+      n_draws: int,
+      rng_handler: backend.RNGHandler,
+  ) -> Mapping[str, backend.Tensor]:
+    """Draws samples from the prior distributions of the control variables.
+
+    Args:
+      n_draws: Number of samples drawn from the prior distribution.
+      rng_handler: The backend-agnostic RNG handler managing the seed state.
+
+    Returns:
+      A mapping of control parameter names to a tensor of shape `[n_draws,
+      n_geos, n_controls]` or `[n_draws, n_controls]` containing the samples.
+    """
+    ctx = self._model_context
+
+    prior = ctx.prior_broadcast
+    sample_shape = [1, n_draws]
+
+    controls_vars = {
+        constants.GAMMA_C: prior.gamma_c.sample(
+            sample_shape=sample_shape, seed=rng_handler.get_next_seed()
+        ),
+        constants.XI_C: prior.xi_c.sample(
+            sample_shape=sample_shape, seed=rng_handler.get_next_seed()
+        ),
+    }
+    gamma_gc_dev = backend.tfd.Sample(
+        backend.tfd.Normal(
+            loc=backend.to_tensor(0.0, dtype=backend.float_dtype),
+            scale=backend.to_tensor(1.0, dtype=backend.float_dtype),
+        ),
+        [ctx.n_geos, ctx.n_controls],
+        name=constants.GAMMA_GC_DEV,
+    ).sample(sample_shape=sample_shape, seed=rng_handler.get_next_seed())
+    controls_vars[constants.GAMMA_GC] = backend.tfd.Deterministic(
+        controls_vars[constants.GAMMA_C][..., backend.newaxis, :]
+        + controls_vars[constants.XI_C][..., backend.newaxis, :] * gamma_gc_dev,
+        name=constants.GAMMA_GC,
+    ).sample(seed=rng_handler.get_next_seed())
+    return controls_vars
+
   def _sample_non_media_treatments_priors(
       self,
       n_draws: int,
@@ -692,11 +735,15 @@ class PriorDistributionSampler:
     # `sample_shape` is prepended to the shape of each BatchBroadcast in `prior`
     # when it is sampled.
     sample_shape = [1, n_draws]
-    # TODO
-    if ctx.model_spec.allows_negative_aggregate_baseline:
-      tau_g_excl_baseline = prior.tau_g_excl_baseline.sample(
-          sample_shape=sample_shape, seed=rng_handler.get_next_seed()
-      )
+    baseline_constraint = ctx.aggregate_baseline_constraint
+    tau_g_excl_baseline = prior.tau_g_excl_baseline.sample(
+        sample_shape=sample_shape, seed=rng_handler.get_next_seed()
+    )
+
+    # TODO: Deduplicate sigma and tau_g sampling across branches.
+    if (
+        baseline_constraint is None
+    ):  # Meaning, baseline is allowed to go negative.
       base_vars = {
           constants.KNOT_VALUES: prior.knot_values.sample(
               sample_shape=sample_shape, seed=rng_handler.get_next_seed()
@@ -724,33 +771,9 @@ class PriorDistributionSampler:
       # Omit gamma_c, xi_c, and gamma_gc parameters from sampled distributions
       # if there are no control variables in the model.
       if ctx.n_controls:
-        base_vars |= {
-            constants.GAMMA_C: prior.gamma_c.sample(
-                sample_shape=sample_shape, seed=rng_handler.get_next_seed()
-            ),
-            constants.XI_C: prior.xi_c.sample(
-                sample_shape=sample_shape, seed=rng_handler.get_next_seed()
-            ),
-        }
-
-        gamma_gc_dev = backend.tfd.Sample(
-            backend.tfd.Normal(
-                loc=backend.to_tensor(0.0, dtype=backend.float_dtype),
-                scale=backend.to_tensor(1.0, dtype=backend.float_dtype),
-            ),
-            [ctx.n_geos, ctx.n_controls],
-            name=constants.GAMMA_GC_DEV,
-        ).sample(sample_shape=sample_shape, seed=rng_handler.get_next_seed())
-        base_vars[constants.GAMMA_GC] = backend.tfd.Deterministic(
-            base_vars[constants.GAMMA_C][..., backend.newaxis, :]
-            + base_vars[constants.XI_C][..., backend.newaxis, :] * gamma_gc_dev,
-            name=constants.GAMMA_GC,
-        ).sample(seed=rng_handler.get_next_seed())
+        base_vars |= self._sample_controls_priors(n_draws, rng_handler)
 
     else:
-      tau_g_excl_baseline = prior.tau_g_excl_baseline.sample(
-          sample_shape=sample_shape, seed=rng_handler.get_next_seed()
-      )
       base_vars = {
           constants.SIGMA: prior.sigma.sample(
               sample_shape=sample_shape, seed=rng_handler.get_next_seed()
@@ -764,36 +787,13 @@ class PriorDistributionSampler:
       }
 
       if ctx.n_controls:
-        base_vars |= {
-            constants.GAMMA_C: prior.gamma_c.sample(
-                sample_shape=sample_shape, seed=rng_handler.get_next_seed()
-            ),
-            constants.XI_C: prior.xi_c.sample(
-                sample_shape=sample_shape, seed=rng_handler.get_next_seed()
-            ),
-        }
-
-        gamma_gc_dev = backend.tfd.Sample(
-            backend.tfd.Normal(
-                loc=backend.to_tensor(0.0, dtype=backend.float_dtype),
-                scale=backend.to_tensor(1.0, dtype=backend.float_dtype),
-            ),
-            [ctx.n_geos, ctx.n_controls],
-            name=constants.GAMMA_GC_DEV,
-        ).sample(sample_shape=sample_shape, seed=rng_handler.get_next_seed())
-        base_vars[constants.GAMMA_GC] = backend.tfd.Deterministic(
-            base_vars[constants.GAMMA_C][..., backend.newaxis, :]
-            + base_vars[constants.XI_C][..., backend.newaxis, :] * gamma_gc_dev,
-            name=constants.GAMMA_GC,
-        ).sample(seed=rng_handler.get_next_seed())
+        base_vars |= self._sample_controls_priors(n_draws, rng_handler)
 
       if ctx.non_media_treatments_normalized is not None:
         base_vars |= self._sample_non_media_treatments_priors(  # pyrefly: ignore[unsupported-operation]
             n_draws, rng_handler, batch_size=batch_size
         )
 
-      baseline_constraint = ctx.aggregate_baseline_constraint
-      assert baseline_constraint is not None
       geo_offset = float(ctx.n_times) * backend.einsum(
           "g,...g->...",
           baseline_constraint.geo_weights,
@@ -884,9 +884,7 @@ class PriorDistributionSampler:
           backend.einsum(
               "...k,kt->...t",
               knot_values,
-              backend.to_tensor(
-                  ctx.knot_info.weights, dtype=knot_dtype
-              ),
+              backend.to_tensor(ctx.knot_info.weights, dtype=knot_dtype),
           ),
           name=constants.MU_T,
       ).sample(seed=rng_handler.get_next_seed())
@@ -907,8 +905,10 @@ class PriorDistributionSampler:
       base_vars |= self._sample_organic_rf_priors(
           n_draws, rng_handler, batch_size=batch_size
       )
+    # The constrained path has already sampled the non-media treatments, before
+    # the knots.
     if (
-        ctx.model_spec.allows_negative_aggregate_baseline
+        baseline_constraint is None
         and ctx.non_media_treatments_normalized is not None
     ):
       base_vars |= self._sample_non_media_treatments_priors(
