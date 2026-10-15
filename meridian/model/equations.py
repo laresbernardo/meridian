@@ -33,6 +33,71 @@ __all__ = [
 ]
 
 
+def _solve_coefficient_mean(
+    *,
+    incremental_outcome_x: backend.Tensor,
+    outcome_per_unit: backend.Tensor,
+    eta_x: backend.Tensor,
+    beta_gx_dev: backend.Tensor,
+    random_effects_normal: bool,
+    time_effect_tx: backend.Tensor | None = None,
+) -> backend.Tensor:
+  """Solves the coefficient mean from the incremental outcome it implies.
+
+  The coefficient in geo `g` (and time period `t`, if there is a time effect) is
+  `beta_x + eta_x * beta_gx_dev[g] + time_effect_tx[t]` for normal random
+  effects, or `exp` of that for log-normal ones. `beta_x` is chosen so that the
+  incremental outcome summed over geos (and time periods) equals
+  `incremental_outcome_x`.
+
+  Args:
+    incremental_outcome_x: The incremental outcome, shape `(..., n_channels)`.
+    outcome_per_unit: The incremental outcome per unit coefficient, shape `(...,
+      n_geos, n_channels)`, or `(..., n_geos, n_times, n_channels)` with a time
+      effect.
+    eta_x: The random effect scale, shape `(..., n_channels)`.
+    beta_gx_dev: The standard-normal geo deviations, shape `(..., n_geos,
+      n_channels)`.
+    random_effects_normal: Whether the random effects are normal rather than
+      log-normal.
+    time_effect_tx: The time effect, shape `(..., n_times, n_channels)`, or
+      `None` for no time effect.
+
+  Returns:
+    The coefficient mean, shape `(..., n_channels)`.
+  """
+  units = "g" if time_effect_tx is None else "gt"
+  if random_effects_normal:
+    numerator_term_x = backend.einsum(
+        f"...{units}x,...gx,...x->...x",
+        outcome_per_unit,
+        beta_gx_dev,
+        eta_x,
+    )
+    if time_effect_tx is not None:
+      numerator_term_x += backend.einsum(
+          "...gtx,...tx->...x", outcome_per_unit, time_effect_tx
+      )
+    denominator_term_x = backend.einsum(f"...{units}x->...x", outcome_per_unit)
+    return (incremental_outcome_x - numerator_term_x) / denominator_term_x
+  # For log-normal random effects, beta_x and eta_x are not mean & std.
+  # The parameterization is beta_gx ~ exp(beta_x + eta_x * N(0, 1)).
+  random_effects = beta_gx_dev * eta_x[..., backend.newaxis, :]
+  if time_effect_tx is not None:
+    random_effects = (
+        random_effects[..., :, backend.newaxis, :]
+        + time_effect_tx[..., backend.newaxis, :, :]
+    )
+  denominator_term_x = backend.einsum(
+      f"...{units}x,...{units}x->...x",
+      outcome_per_unit,
+      backend.exp(random_effects),
+  )
+  # pyrefly: ignore[bad-argument-type]
+  log_incremental_outcome_x = backend.log(incremental_outcome_x)
+  return log_incremental_outcome_x - backend.log(denominator_term_x)
+
+
 class ModelEquations:
   """Provides core, stateless mathematical functions for Meridian MMM."""
 
@@ -577,6 +642,87 @@ class ModelEquations:
       random_effects_normal = (
           self._context.media_effects_dist == constants.MEDIA_EFFECTS_NORMAL
       )
+    return _solve_coefficient_mean(
+        incremental_outcome_x=incremental_outcome_x,
+        outcome_per_unit=self._outcome_per_unit_coefficient(
+            linear_predictor_counterfactual_difference, sum_over_time=True
+        ),
+        eta_x=eta_x,
+        beta_gx_dev=beta_gx_dev,
+        random_effects_normal=random_effects_normal,
+    )
+
+  def _calculate_time_varying_beta_x(
+      self,
+      *,
+      incremental_outcome_x: backend.Tensor,
+      linear_predictor_counterfactual_difference: backend.Tensor,
+      eta_x: backend.Tensor,
+      beta_gx_dev: backend.Tensor,
+      zeta_x: backend.Tensor,
+      phi_tx: backend.Tensor,
+  ) -> backend.Tensor:
+    """Calculates the coefficient mean of paid channels with changepoints.
+
+    This is `calculate_beta_x` with the time effect of channels that have
+    changepoints. Their coefficient in geo `g` and time period `t` is
+    `exp(beta_x + eta_x * beta_gx_dev[g] + zeta_x * phi_tx[t])`, or the same
+    without `exp` for normal random effects. `beta_x` is chosen so that the
+    incremental outcome over all geos and time periods, including the time
+    effect, equals `incremental_outcome_x`. This keeps ROI, mROI and
+    contribution priors on the whole training period, as for channels without
+    changepoints. All inputs only include the channels with changepoints.
+
+    Args:
+      incremental_outcome_x: The incremental outcome implied by the prior or
+        posterior draw, shape `(..., n_channels)`.
+      linear_predictor_counterfactual_difference: The difference between the
+        treatment and its counterfactual on the linear predictor scale, shape
+        `(..., n_geos, n_times, n_channels)`.
+      eta_x: The random effect scale, shape `(..., n_channels)`.
+      beta_gx_dev: The standard-normal geo deviations, shape `(..., n_geos,
+        n_channels)`.
+      zeta_x: The scale of the time effect, shape `(..., n_channels)`.
+      phi_tx: The time effect from `changepoints.expand_intervals`, shape `(...,
+        n_times, n_channels)`.
+
+    Returns:
+      The coefficient mean of the channels with changepoints, shape `(...,
+      n_channels)`.
+    """
+    return _solve_coefficient_mean(
+        incremental_outcome_x=incremental_outcome_x,
+        outcome_per_unit=self._outcome_per_unit_coefficient(
+            linear_predictor_counterfactual_difference, sum_over_time=False
+        ),
+        eta_x=eta_x,
+        beta_gx_dev=beta_gx_dev,
+        # TODO: Use `changepoint_media_effects_dist`, which
+        # defaults to log-normal even in national models.
+        random_effects_normal=(
+            self._context.media_effects_dist == constants.MEDIA_EFFECTS_NORMAL
+        ),
+        time_effect_tx=zeta_x[..., backend.newaxis, :] * phi_tx,
+    )
+
+  def _outcome_per_unit_coefficient(
+      self,
+      linear_predictor_counterfactual_difference: backend.Tensor,
+      *,
+      sum_over_time: bool,
+  ) -> backend.Tensor:
+    """Returns the incremental outcome per unit coefficient.
+
+    Args:
+      linear_predictor_counterfactual_difference: The difference between the
+        treatment and its counterfactual on the linear predictor scale, shape
+        `(..., n_geos, n_times, n_channels)`.
+      sum_over_time: Whether to sum over the time periods.
+
+    Returns:
+      Shape `(..., n_geos, n_channels)` if `sum_over_time`, else `(..., n_geos,
+      n_times, n_channels)`.
+    """
     if self._context.revenue_per_kpi is None:
       revenue_per_kpi = backend.ones(
           [self._context.n_geos, self._context.n_times],
@@ -584,29 +730,11 @@ class ModelEquations:
       )
     else:
       revenue_per_kpi = self._context.revenue_per_kpi
-    incremental_outcome_gx_over_beta_gx = backend.einsum(
-        "...gtx,gt,g,->...gx",
+    output = "...gx" if sum_over_time else "...gtx"
+    return backend.einsum(
+        f"...gtx,gt,g,->{output}",
         linear_predictor_counterfactual_difference,
         revenue_per_kpi,
         self._context.population,
         self._context.kpi_transformer.population_scaled_stdev,
     )
-    if random_effects_normal:
-      numerator_term_x = backend.einsum(
-          "...gx,...gx,...x->...x",
-          incremental_outcome_gx_over_beta_gx,
-          beta_gx_dev,
-          eta_x,
-      )
-      denominator_term_x = backend.einsum(
-          "...gx->...x", incremental_outcome_gx_over_beta_gx
-      )
-      return (incremental_outcome_x - numerator_term_x) / denominator_term_x
-    # For log-normal random effects, beta_x and eta_x are not mean & std.
-    # The parameterization is beta_gx ~ exp(beta_x + eta_x * N(0, 1)).
-    denominator_term_x = backend.einsum(
-        "...gx,...gx->...x",
-        incremental_outcome_gx_over_beta_gx,
-        backend.exp(beta_gx_dev * eta_x[..., backend.newaxis, :]),
-    )
-    return backend.log(incremental_outcome_x) - backend.log(denominator_term_x)  # pyrefly: ignore[bad-argument-type]

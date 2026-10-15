@@ -815,6 +815,141 @@ class CalculateBetaXTest(
     )
 
 
+class CalculateTimeVaryingBetaXTest(
+    test_utils.MeridianTestCase, parameterized.TestCase
+):
+
+  # pylint: disable=protected-access
+
+  _N_GEOS = 4
+  _N_TIMES = 6
+  _N_CHANNELS = 2
+
+  def setUp(self):
+    super().setUp()
+    rng = np.random.default_rng(0)
+
+    def normal(*shape: int) -> np.ndarray:
+      return rng.normal(size=shape).astype(backend.np_float_dtype)
+
+    self._inputs = dict(
+        incremental_outcome_x=np.abs(normal(3, self._N_CHANNELS)) + 1.0,
+        linear_predictor_counterfactual_difference=np.abs(
+            normal(3, self._N_GEOS, self._N_TIMES, self._N_CHANNELS)
+        ),
+        eta_x=np.abs(normal(3, self._N_CHANNELS)) * 0.3,
+        beta_gx_dev=normal(3, self._N_GEOS, self._N_CHANNELS),
+        zeta_x=np.abs(normal(3, self._N_CHANNELS)) * 0.3,
+        phi_tx=normal(3, self._N_TIMES, self._N_CHANNELS),
+    )
+    self._population = np.abs(normal(self._N_GEOS)) + 1.0
+    self._population_scaled_stdev = 1.7
+    self._revenue_per_kpi = np.abs(normal(self._N_GEOS, self._N_TIMES)) + 0.5
+
+  def _equations(
+      self, media_effects_dist: str, with_revenue_per_kpi: bool = True
+  ) -> equations.ModelEquations:
+    model_context = mock.create_autospec(
+        context.ModelContext, instance=True, spec_set=True
+    )
+    model_context.media_effects_dist = media_effects_dist
+    model_context.revenue_per_kpi = (
+        backend.to_tensor(self._revenue_per_kpi, dtype=backend.float_dtype)
+        if with_revenue_per_kpi
+        else None
+    )
+    model_context.n_geos = self._N_GEOS
+    model_context.n_times = self._N_TIMES
+    model_context.population = backend.to_tensor(
+        self._population, dtype=backend.float_dtype
+    )
+    model_context.kpi_transformer = mock.Mock(
+        population_scaled_stdev=backend.to_tensor(
+            self._population_scaled_stdev, dtype=backend.float_dtype
+        )
+    )
+    return equations.ModelEquations(model_context)
+
+  def _tensors(self, **overrides: np.ndarray) -> dict[str, backend.Tensor]:
+    return {
+        name: backend.to_tensor(value, dtype=backend.float_dtype)
+        for name, value in (self._inputs | overrides).items()
+    }
+
+  @parameterized.product(
+      media_effects_dist=(
+          constants.MEDIA_EFFECTS_LOG_NORMAL,
+          constants.MEDIA_EFFECTS_NORMAL,
+      ),
+      with_revenue_per_kpi=(True, False),
+  )
+  def test_matches_the_incremental_outcome(
+      self, media_effects_dist, with_revenue_per_kpi
+  ):
+    beta_x = self._equations(
+        media_effects_dist, with_revenue_per_kpi
+    )._calculate_time_varying_beta_x(**self._tensors())
+    self.assertEqual(tuple(beta_x.shape), (3, self._N_CHANNELS))
+
+    # Rebuild every geo and time coefficient from the solved `beta_x`, then
+    # recompute the incremental outcome over all geos and time periods.
+    inputs = self._inputs
+    effect = (
+        np.asarray(beta_x)[:, np.newaxis, np.newaxis, :]
+        + (inputs["eta_x"][:, np.newaxis, :] * inputs["beta_gx_dev"])[
+            :, :, np.newaxis, :
+        ]
+        + (inputs["zeta_x"][:, np.newaxis, :] * inputs["phi_tx"])[
+            :, np.newaxis, :, :
+        ]
+    )
+    beta_gtx = (
+        effect
+        if media_effects_dist == constants.MEDIA_EFFECTS_NORMAL
+        else np.exp(effect)
+    )
+    revenue_per_kpi = (
+        self._revenue_per_kpi
+        if with_revenue_per_kpi
+        else np.ones((self._N_GEOS, self._N_TIMES))
+    )
+    incremental_outcome = (
+        np.einsum(
+            "cgtx,gt,g,cgtx->cx",
+            inputs["linear_predictor_counterfactual_difference"],
+            revenue_per_kpi,
+            self._population,
+            beta_gtx,
+        )
+        * self._population_scaled_stdev
+    )
+    test_utils.assert_allclose(
+        incremental_outcome, inputs["incremental_outcome_x"], rtol=1e-4
+    )
+
+  @parameterized.named_parameters(
+      ("log_normal", constants.MEDIA_EFFECTS_LOG_NORMAL),
+      ("normal", constants.MEDIA_EFFECTS_NORMAL),
+  )
+  def test_without_time_effect_matches_calculate_beta_x(
+      self, media_effects_dist
+  ):
+    eqn = self._equations(media_effects_dist)
+    tensors = self._tensors(zeta_x=np.zeros((3, self._N_CHANNELS)))
+    expected = eqn.calculate_beta_x(
+        is_non_media=False,
+        incremental_outcome_x=tensors["incremental_outcome_x"],
+        linear_predictor_counterfactual_difference=tensors[
+            "linear_predictor_counterfactual_difference"
+        ],
+        eta_x=tensors["eta_x"],
+        beta_gx_dev=tensors["beta_gx_dev"],
+    )
+    test_utils.assert_allclose(
+        eqn._calculate_time_varying_beta_x(**tensors), expected, rtol=1e-5
+    )
+
+
 class LinearPredictorCounterfactualDifferenceTest(
     test_utils.MeridianTestCase,
     parameterized.TestCase,

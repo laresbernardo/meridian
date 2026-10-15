@@ -51,7 +51,6 @@ __all__ = [
     'get_changepoint_info',
     'interval_weights',
     'merge_channels',
-    'solve_beta',
     'time_varying_coefficients',
 ]
 
@@ -318,91 +317,6 @@ def time_varying_coefficients(
       beta_gx[..., :, backend.newaxis, :]
       * backend.exp(time_effect)[..., backend.newaxis, :, :]
   )
-
-
-# TODO: Share the steps that `solve_beta` and
-# `ModelEquations.calculate_beta_x` have in common through feature-neutral
-# helpers in `equations.py`, keeping models without changepoints bit-identical.
-def solve_beta(
-    *,
-    incremental_outcome_x: backend.Tensor,
-    linear_predictor_counterfactual_difference: backend.Tensor,
-    eta_x: backend.Tensor,
-    beta_gx_dev: backend.Tensor,
-    zeta: backend.Tensor,
-    phi: backend.Tensor,
-    population: backend.Tensor,
-    population_scaled_stdev: backend.Tensor | float,
-    revenue_per_kpi: backend.Tensor | None,
-    media_effects_dist: str,
-) -> backend.Tensor:
-  """Solves `beta` of channels with changepoints from their incremental outcome.
-
-  This is the counterpart of `ModelEquations.calculate_beta_x` for channels
-  with changepoints. `beta` is chosen so that the incremental outcome over all
-  geos and time periods, including the time effect, equals
-  `incremental_outcome_x`. This keeps ROI, mROI and contribution priors on the
-  whole training period, as for channels without changepoints. All inputs
-  only include the channels with changepoints.
-
-  Args:
-    incremental_outcome_x: The incremental outcome implied by the prior or
-      posterior draw, shape `(..., n_channels)`.
-    linear_predictor_counterfactual_difference: The difference between the
-      treatment and its counterfactual on the linear predictor scale, shape
-      `(..., n_geos, n_times, n_channels)`.
-    eta_x: The geo random effect scale, shape `(..., n_channels)`.
-    beta_gx_dev: The standard-normal geo deviations, shape `(..., n_geos,
-      n_channels)`.
-    zeta: The scale of the time effect, shape `(..., n_channels)`.
-    phi: The time effect from `expand_intervals`, shape `(..., n_times,
-      n_channels)`.
-    population: The geo populations, shape `(n_geos,)`.
-    population_scaled_stdev: The standard deviation used to scale the
-      population-scaled KPI.
-    revenue_per_kpi: The revenue per KPI, shape `(n_geos, n_times)`, or `None`
-      to use 1.
-    media_effects_dist: `constants.MEDIA_EFFECTS_LOG_NORMAL` or
-      `constants.MEDIA_EFFECTS_NORMAL`.
-
-  Returns:
-    `beta` of the channels with changepoints, shape `(..., n_channels)`.
-  """
-  dtype = linear_predictor_counterfactual_difference.dtype
-  if revenue_per_kpi is None:
-    revenue_per_kpi = backend.ones(
-        linear_predictor_counterfactual_difference.shape[-3:-1], dtype=dtype
-    )
-  # Incremental outcome per unit coefficient, by geo, time and channel.
-  outcome_per_beta = backend.einsum(
-      '...gtx,gt,g,->...gtx',
-      linear_predictor_counterfactual_difference,
-      backend.cast(revenue_per_kpi, dtype),
-      backend.cast(population, dtype),
-      backend.cast(population_scaled_stdev, dtype),
-  )
-  if media_effects_dist == constants.MEDIA_EFFECTS_NORMAL:
-    random_effects_term = backend.einsum(
-        '...gtx,...gx,...x->...x', outcome_per_beta, beta_gx_dev, eta_x
-    ) + backend.einsum('...gtx,...tx,...x->...x', outcome_per_beta, phi, zeta)
-    return (incremental_outcome_x - random_effects_term) / backend.einsum(
-        '...gtx->...x', outcome_per_beta
-    )
-  # For log-normal effects, beta_gt = exp(beta) * exp(random effects), so
-  # exp(beta) is the incremental outcome over the summed outcome per unit
-  # exp(beta).
-  geo_effect = backend.expand_dims(
-      beta_gx_dev * eta_x[..., backend.newaxis, :], axis=-2
-  )
-  time_effect = backend.expand_dims(
-      phi * zeta[..., backend.newaxis, :], axis=-3
-  )
-  denominator = backend.einsum(
-      '...gtx,...gtx->...x',
-      outcome_per_beta,
-      backend.exp(geo_effect + time_effect),
-  )
-  return backend.log(incremental_outcome_x) - backend.log(denominator)  # pyrefly: ignore[bad-argument-type]
 
 
 def merge_channels(

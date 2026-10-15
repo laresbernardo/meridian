@@ -12,16 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest import mock
-
 from absl.testing import absltest
 from absl.testing import parameterized
 from meridian import backend
 from meridian import constants
 from meridian.backend import test_utils
 from meridian.model import changepoints
-from meridian.model import context
-from meridian.model import equations
 import numpy as np
 
 _LOG_NORMAL = constants.MEDIA_EFFECTS_LOG_NORMAL
@@ -273,113 +269,6 @@ class TimeVaryingMathTest(test_utils.MeridianTestCase, parameterized.TestCase):
     test_utils.assert_allclose(
         result, np.broadcast_to(beta_gx[:, np.newaxis, :], (4, 6, 2))
     )
-
-  def _solve_inputs(self) -> dict[str, np.ndarray]:
-    n_geos, n_times, n_channels = 4, 6, 2
-    return dict(
-        incremental_outcome_x=np.abs(self._normal(3, n_channels)) + 1.0,
-        linear_predictor_counterfactual_difference=np.abs(
-            self._normal(3, n_geos, n_times, n_channels)
-        ),
-        eta_x=np.abs(self._normal(3, n_channels)) * 0.3,
-        beta_gx_dev=self._normal(3, n_geos, n_channels),
-        zeta=np.abs(self._normal(3, n_channels)) * 0.3,
-        phi=self._normal(3, n_times, n_channels),
-        population=np.abs(self._normal(n_geos)) + 1.0,
-        population_scaled_stdev=np.array(1.7, dtype=backend.np_float_dtype),
-        revenue_per_kpi=np.abs(self._normal(n_geos, n_times)) + 0.5,
-    )
-
-  def _solve_beta(
-      self,
-      inputs: dict[str, np.ndarray],
-      dist: str,
-      with_revenue_per_kpi: bool = True,
-  ) -> backend.Tensor:
-    return changepoints.solve_beta(
-        incremental_outcome_x=_tensor(inputs['incremental_outcome_x']),
-        linear_predictor_counterfactual_difference=_tensor(
-            inputs['linear_predictor_counterfactual_difference']
-        ),
-        eta_x=_tensor(inputs['eta_x']),
-        beta_gx_dev=_tensor(inputs['beta_gx_dev']),
-        zeta=_tensor(inputs['zeta']),
-        phi=_tensor(inputs['phi']),
-        population=_tensor(inputs['population']),
-        population_scaled_stdev=_tensor(inputs['population_scaled_stdev']),
-        revenue_per_kpi=(
-            _tensor(inputs['revenue_per_kpi']) if with_revenue_per_kpi else None
-        ),
-        media_effects_dist=dist,
-    )
-
-  @parameterized.product(
-      dist=(_LOG_NORMAL, _NORMAL), with_revenue_per_kpi=(True, False)
-  )
-  def test_solve_beta_matches_the_incremental_outcome(
-      self, dist, with_revenue_per_kpi
-  ):
-    inputs = self._solve_inputs()
-    beta = self._solve_beta(inputs, dist, with_revenue_per_kpi)
-    self.assertEqual(tuple(beta.shape), (3, 2))
-
-    # Rebuild every geo and time coefficient from the solved `beta`, then
-    # recompute the incremental outcome over all geos and time periods.
-    beta = np.asarray(beta)
-    geo_effect = beta[:, np.newaxis, :] + (
-        inputs['eta_x'][:, np.newaxis, :] * inputs['beta_gx_dev']
-    )
-    beta_gx = geo_effect if dist == _NORMAL else np.exp(geo_effect)
-    beta_gtx = np.asarray(
-        changepoints.time_varying_coefficients(
-            beta_gx=_tensor(beta_gx),
-            zeta=_tensor(inputs['zeta']),
-            phi=_tensor(inputs['phi']),
-            media_effects_dist=dist,
-        )
-    )
-    revenue_per_kpi = (
-        inputs['revenue_per_kpi'] if with_revenue_per_kpi else np.ones((4, 6))
-    )
-    incremental_outcome = np.einsum(
-        'cgtx,gt,g,cgtx->cx',
-        inputs['linear_predictor_counterfactual_difference'],
-        revenue_per_kpi,
-        inputs['population'],
-        beta_gtx,
-    ) * float(inputs['population_scaled_stdev'])
-    test_utils.assert_allclose(
-        incremental_outcome, inputs['incremental_outcome_x'], rtol=1e-4
-    )
-
-  @parameterized.named_parameters(
-      ('log_normal', _LOG_NORMAL), ('normal', _NORMAL)
-  )
-  def test_solve_beta_without_time_effect_matches_calculate_beta_x(self, dist):
-    inputs = self._solve_inputs()
-    inputs['zeta'] = np.zeros_like(inputs['zeta'])
-    model_context = mock.create_autospec(
-        context.ModelContext, instance=True, spec_set=True
-    )
-    model_context.media_effects_dist = dist
-    model_context.revenue_per_kpi = _tensor(inputs['revenue_per_kpi'])
-    model_context.n_geos = 4
-    model_context.n_times = 6
-    model_context.population = _tensor(inputs['population'])
-    model_context.kpi_transformer = mock.Mock(
-        population_scaled_stdev=_tensor(inputs['population_scaled_stdev'])
-    )
-    expected = equations.ModelEquations(model_context).calculate_beta_x(
-        is_non_media=False,
-        incremental_outcome_x=_tensor(inputs['incremental_outcome_x']),
-        linear_predictor_counterfactual_difference=_tensor(
-            inputs['linear_predictor_counterfactual_difference']
-        ),
-        eta_x=_tensor(inputs['eta_x']),
-        beta_gx_dev=_tensor(inputs['beta_gx_dev']),
-    )
-    result = self._solve_beta(inputs, dist)
-    test_utils.assert_allclose(result, expected, rtol=1e-5)
 
   def test_merge_channels(self):
     x = self._normal(2, 3)  # (chains, all 3 channels)
