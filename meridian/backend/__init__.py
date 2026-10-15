@@ -15,6 +15,7 @@
 """Backend Abstraction Layer for Meridian."""
 
 import abc
+from collections.abc import Callable
 import functools
 import os
 from typing import Any, Optional, Sequence, Tuple, TYPE_CHECKING, Union
@@ -315,6 +316,39 @@ def _tf_function_wrapper(func=None, **kwargs):
   if func:
     return decorator(func)
   return decorator
+
+
+def _jax_compile_temporary_function(
+    func: Callable[..., Any],
+) -> Callable[..., Any]:
+  """Compiles a function that its caller creates anew on every call.
+
+  Args:
+    func: The function to compile.
+
+  Returns:
+    `func` compiled with `jax.jit`.
+  """
+  import jax  # pylint: disable=redefined-outer-name
+
+  return jax.jit(func)
+
+
+def _tf_compile_temporary_function(
+    func: Callable[..., Any],
+) -> Callable[..., Any]:
+  """Returns `func` uncompiled when its caller creates it anew on every call.
+
+  TensorFlow does not free a discarded compiled function, so compiling a new
+  function on every call would leak memory.
+
+  Args:
+    func: The function to return uncompiled.
+
+  Returns:
+    `func` unchanged.
+  """
+  return func
 
 
 def _jax_nanmedian(a, axis=None):
@@ -1099,6 +1133,7 @@ if _BACKEND == config.Backend.JAX:
   broadcast_dynamic_shape = _jax_broadcast_dynamic_shape
   broadcast_to = _ops.broadcast_to
   cast = _jax_cast
+  compile_temporary_function = _jax_compile_temporary_function
   concatenate = _ops.concatenate
   cumsum = _ops.cumsum
   divide = _ops.divide
@@ -1290,6 +1325,7 @@ elif _BACKEND == config.Backend.TENSORFLOW:
   broadcast_dynamic_shape = _ops.broadcast_dynamic_shape
   broadcast_to = _ops.broadcast_to
   cast = _ops.cast
+  compile_temporary_function = _tf_compile_temporary_function
   concatenate = _ops.concat
   cumsum = _ops.cumsum
   divide = _ops.divide
