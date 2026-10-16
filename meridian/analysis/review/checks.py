@@ -135,6 +135,60 @@ class BaseROICheck(BaseCheck[ConfigType, ResultType]):
     """Checks if the check is relevant for the given model context."""
     return cls._uses_roi_priors(model_context)
 
+  def _roi_channel_types(self) -> list[tuple[str, str]]:
+    """Returns the channel types whose ROI posterior is available.
+
+    ROI posteriors (`roi_m`, `roi_rf`) only exist for channel types that use
+    ROI priors. E.g. a model with ROI priors for media channels but mROI priors
+    for RF channels has `roi_m` but no `roi_rf` in its posterior.
+
+    Returns:
+      A list of `(channel_coord, roi_var_name)` tuples, media channels first.
+    """
+    model_spec = self._model_context.model_spec
+    candidates = (
+        (
+            constants.MEDIA_CHANNEL,
+            constants.ROI_M,
+            model_spec.effective_media_prior_type,
+        ),
+        (
+            constants.RF_CHANNEL,
+            constants.ROI_RF,
+            model_spec.effective_rf_prior_type,
+        ),
+    )
+    posterior_coords = self._inference_data.posterior.coords  # pyrefly: ignore[missing-attribute]
+    return [
+        (channel_coord, roi_var)
+        for channel_coord, roi_var, prior_type in candidates
+        if prior_type == constants.TREATMENT_PRIOR_TYPE_ROI
+        and channel_coord in posterior_coords
+    ]
+
+  def _roi_channel_spend_share(self, spend_share: np.ndarray) -> np.ndarray:
+    """Selects the spend share of the channels in `_roi_channel_types()`.
+
+    Args:
+      spend_share: Spend share of all paid channels, media channels first.
+
+    Returns:
+      The spend share entries for channels whose ROI posterior is available,
+      in the same order as the channels returned by `_roi_channel_types()`.
+    """
+    posterior = self._inference_data.posterior  # pyrefly: ignore[missing-attribute]
+    roi_channel_coords = {coord for coord, _ in self._roi_channel_types()}
+    offset = 0
+    parts = []
+    for channel_coord in (constants.MEDIA_CHANNEL, constants.RF_CHANNEL):
+      if channel_coord not in posterior.coords:
+        continue
+      n_channels = len(getattr(posterior, channel_coord).values)
+      if channel_coord in roi_channel_coords:
+        parts.append(spend_share[offset : offset + n_channels])
+      offset += n_channels
+    return np.concatenate(parts) if parts else spend_share[:0]
+
 
 # ==============================================================================
 # Check: Convergence
@@ -812,14 +866,11 @@ class ROIConsistencyCheck(
     prior_rois = []
     posterior_rois = []
     channel_names = []
-    if constants.MEDIA_CHANNEL in self._inference_data.posterior.coords:  # pyrefly: ignore[missing-attribute]
-      prior_rois.append(self._model_context.model_spec.prior.roi_m)
-      posterior_rois.append(self._inference_data.posterior.roi_m)  # pyrefly: ignore[missing-attribute]
-      channel_names.append(self._inference_data.posterior.media_channel.values)  # pyrefly: ignore[missing-attribute]
-    if constants.RF_CHANNEL in self._inference_data.posterior.coords:  # pyrefly: ignore[missing-attribute]
-      prior_rois.append(self._model_context.model_spec.prior.roi_rf)
-      posterior_rois.append(self._inference_data.posterior.roi_rf)  # pyrefly: ignore[missing-attribute]
-      channel_names.append(self._inference_data.posterior.rf_channel.values)  # pyrefly: ignore[missing-attribute]
+    posterior = self._inference_data.posterior  # pyrefly: ignore[missing-attribute]
+    for channel_coord, roi_var in self._roi_channel_types():
+      prior_rois.append(getattr(self._model_context.model_spec.prior, roi_var))
+      posterior_rois.append(getattr(posterior, roi_var))
+      channel_names.append(getattr(posterior, channel_coord).values)
 
     channel_data = _get_roi_consistency_channel_data(
         prior_rois=prior_rois,
@@ -953,7 +1004,7 @@ class PriorPosteriorShiftCheck(
     Returns:
       A tuple of (`channel_results`, `no_shift_channels`).
     """
-    if channel_type not in self._inference_data.posterior.coords:  # pyrefly: ignore[missing-attribute]
+    if channel_type not in dict(self._roi_channel_types()):
       return [], []
 
     channel_results = []
@@ -1091,19 +1142,16 @@ class ImplausibleROICheck(
     # 2. Get posterior ROI and channels
     posterior_rois = []
     channels = []
-    if constants.MEDIA_CHANNEL in self._inference_data.posterior.coords:  # pyrefly: ignore[missing-attribute]
-      posterior_rois.append(self._inference_data.posterior.roi_m.values)  # pyrefly: ignore[missing-attribute]
-      channels.extend(
-          self._inference_data.posterior.media_channel.values.tolist()  # pyrefly: ignore[missing-attribute]
-      )
-    if constants.RF_CHANNEL in self._inference_data.posterior.coords:  # pyrefly: ignore[missing-attribute]
-      posterior_rois.append(self._inference_data.posterior.roi_rf.values)  # pyrefly: ignore[missing-attribute]
-      channels.extend(self._inference_data.posterior.rf_channel.values.tolist())  # pyrefly: ignore[missing-attribute]
+    posterior = self._inference_data.posterior  # pyrefly: ignore[missing-attribute]
+    for channel_coord, roi_var in self._roi_channel_types():
+      posterior_rois.append(getattr(posterior, roi_var).values)
+      channels.extend(getattr(posterior, channel_coord).values.tolist())
 
     if not posterior_rois:
       raise ValueError("No posterior ROI data found in inference_data.")
 
     posterior_roi_concat = np.concatenate(posterior_rois, axis=-1)
+    spend_share = self._roi_channel_spend_share(spend_share)
     roi_means = np.mean(posterior_roi_concat, axis=(0, 1))
 
     # 3. Evaluate checks
@@ -1197,20 +1245,16 @@ class HighVarianceCheck(
     posterior_rois = []
     channels = []
 
-    if constants.MEDIA_CHANNEL in self._inference_data.posterior.coords:  # pyrefly: ignore[missing-attribute]
-      posterior_rois.append(self._inference_data.posterior.roi_m.values)  # pyrefly: ignore[missing-attribute]
-      channels.extend(
-          self._inference_data.posterior.media_channel.values.tolist()  # pyrefly: ignore[missing-attribute]
-      )
-
-    if constants.RF_CHANNEL in self._inference_data.posterior.coords:  # pyrefly: ignore[missing-attribute]
-      posterior_rois.append(self._inference_data.posterior.roi_rf.values)  # pyrefly: ignore[missing-attribute]
-      channels.extend(self._inference_data.posterior.rf_channel.values.tolist())  # pyrefly: ignore[missing-attribute]
+    posterior = self._inference_data.posterior  # pyrefly: ignore[missing-attribute]
+    for channel_coord, roi_var in self._roi_channel_types():
+      posterior_rois.append(getattr(posterior, roi_var).values)
+      channels.extend(getattr(posterior, channel_coord).values.tolist())
 
     if not posterior_rois:
       raise ValueError("No posterior ROI data found in inference_data.")
 
     posterior_roi_concat = np.concatenate(posterior_rois, axis=-1)
+    spend_share = self._roi_channel_spend_share(spend_share)
     roi_medians = np.median(posterior_roi_concat, axis=(0, 1))
 
     # 3. Compute credible intervals using az.hdi

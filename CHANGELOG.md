@@ -23,6 +23,11 @@ To release a new version (e.g. from `1.0.0` -> `2.0.0`):
 
 ## [Unreleased]
 
+*   Fix `ModelReviewer` failing on models that use ROI priors for only some
+    channel types (e.g. ROI priors for media channels and mROI priors for reach
+    and frequency channels). The ROI Consistency, Prior-Posterior Shift,
+    Implausible ROI and High Variance checks now skip channel types whose
+    posterior has no ROI.
 *   On the JAX backend, compile the posterior reconstruction step once per
     `sample_posterior` call, which lowers its peak device memory and wall time.
 *   On the JAX backend, compile the media, RF, organic, and non-media

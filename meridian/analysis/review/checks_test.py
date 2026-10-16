@@ -140,6 +140,12 @@ class ROIConsistencyCheckTest(parameterized.TestCase):
     self.model_context = mock.create_autospec(
         spec=context.ModelContext, spec_set=True, instance=True
     )
+    self.model_context.model_spec.effective_media_prior_type = (
+        constants.TREATMENT_PRIOR_TYPE_ROI
+    )
+    self.model_context.model_spec.effective_rf_prior_type = (
+        constants.TREATMENT_PRIOR_TYPE_ROI
+    )
     self.inference_data = mock.create_autospec(
         spec=az.InferenceData, spec_set=False, instance=True
     )
@@ -591,6 +597,12 @@ class PriorPosteriorShiftCheckTest(parameterized.TestCase):
     self.model_context = mock.create_autospec(
         spec=context.ModelContext, spec_set=True, instance=True
     )
+    self.model_context.model_spec.effective_media_prior_type = (
+        constants.TREATMENT_PRIOR_TYPE_ROI
+    )
+    self.model_context.model_spec.effective_rf_prior_type = (
+        constants.TREATMENT_PRIOR_TYPE_ROI
+    )
     self.inference_data = mock.create_autospec(
         spec=az.InferenceData, spec_set=False, instance=True
     )
@@ -707,6 +719,23 @@ class PriorPosteriorShiftCheckTest(parameterized.TestCase):
         config=self.config,
     )
     return check.run()
+
+  def test_prior_posterior_shift_check_skips_rf_channels_without_roi_priors(
+      self,
+  ):
+    # RF channels use mROI priors, so the posterior has no `roi_rf`.
+    self.model_context.model_spec.effective_rf_prior_type = (
+        constants.TREATMENT_PRIOR_TYPE_MROI
+    )
+    result = self._run_prior_posterior_shift_check(
+        media_channel_names=["ch1"],
+        posterior_media_samples=np.full((1, 100, 1), 5.0),
+        rf_channel_names=["rf1"],
+        posterior_rf_samples=np.full((1, 100, 1), 5.0),
+    )
+    self.assertEqual(
+        [r.channel_name for r in result.channel_results], ["ch1"]
+    )
 
   @parameterized.named_parameters(
       dict(
@@ -1703,6 +1732,12 @@ class ImplausibleROICheckTest(parameterized.TestCase):
         spec=input_data.InputData, spec_set=True, instance=True
     )
     self.model_context.input_data = self.input_data
+    self.model_context.model_spec.effective_media_prior_type = (
+        constants.TREATMENT_PRIOR_TYPE_ROI
+    )
+    self.model_context.model_spec.effective_rf_prior_type = (
+        constants.TREATMENT_PRIOR_TYPE_ROI
+    )
     self.inference_data = mock.create_autospec(
         spec=az.InferenceData, spec_set=False, instance=True
     )
@@ -1914,6 +1949,39 @@ class ImplausibleROICheckTest(parameterized.TestCase):
     self.assertEmpty(result.high_roi_channels)
     self.assertEmpty(result.low_roi_channels)
 
+  def test_implausible_roi_check_skips_rf_channels_without_roi_priors(self):
+    # RF channels use mROI priors, so the posterior has no `roi_rf`.
+    self.model_context.model_spec.effective_rf_prior_type = (
+        constants.TREATMENT_PRIOR_TYPE_MROI
+    )
+    self.model_context.input_data.get_total_spend.return_value = np.array(
+        [50.0, 50.0, 50.0]
+    )
+    self.inference_data.posterior.media_channel.values = np.array(
+        ["ch1", "ch2"]
+    )
+    self.inference_data.posterior.rf_channel.values = np.array(["rf1"])
+    self.inference_data.posterior.roi_m.values = np.array([
+        [[2.0, 4.0]],
+    ])  # (chain=1, draw=1, channel=2)
+    self.inference_data.posterior.roi_rf.values = None
+    self.inference_data.posterior.coords = [
+        constants.MEDIA_CHANNEL,
+        constants.RF_CHANNEL,
+    ]
+
+    check = checks.ImplausibleROICheck(
+        model_context=self.model_context,
+        inference_data=self.inference_data,
+        analyzer=self.analyzer,
+        config=configs.ImplausibleROIConfig(),
+    )
+    result = check.run()
+
+    self.assertEqual(
+        [r.channel_name for r in result.channel_results], ["ch1", "ch2"]
+    )
+
   def test_is_relevant_true_when_using_roi_priors(self):
     self.model_context.n_media_channels = 1
     self.model_context.model_spec.effective_media_prior_type = (
@@ -1944,6 +2012,12 @@ class HighVarianceCheckTest(parameterized.TestCase):
         spec=input_data.InputData, spec_set=False, instance=True
     )
     self.model_context.input_data = self.input_data
+    self.model_context.model_spec.effective_media_prior_type = (
+        constants.TREATMENT_PRIOR_TYPE_ROI
+    )
+    self.model_context.model_spec.effective_rf_prior_type = (
+        constants.TREATMENT_PRIOR_TYPE_ROI
+    )
     self.inference_data = mock.create_autospec(
         spec=az.InferenceData, spec_set=False, instance=True
     )
@@ -2397,6 +2471,9 @@ class ChannelChecksThresholdTest(absltest.TestCase):
     )
     model_context.n_media_channels = 2
     model_context.n_rf_channels = 0
+    model_context.model_spec.effective_media_prior_type = (
+        constants.TREATMENT_PRIOR_TYPE_ROI
+    )
     inference_data = mock.create_autospec(
         spec=az.InferenceData, spec_set=False, instance=True
     )
