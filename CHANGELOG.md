@@ -25,6 +25,9 @@ To release a new version (e.g. from `1.0.0` -> `2.0.0`):
 
 *   On the JAX backend, compile the posterior reconstruction step once per
     `sample_posterior` call, which lowers its peak device memory and wall time.
+*   On the JAX backend, compile the media, RF, organic, and non-media
+    coefficient calculations in `sample_prior`, which lowers its peak device
+    memory.
 *   `WeeklyOptimizationGrid` resolves the optimal frequency of reach and
     frequency channels per optimization period, matching
     `create_optimization_grid`.

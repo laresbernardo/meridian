@@ -739,6 +739,7 @@ class PriorDistributionSamplerTest(
       dict(testcase_name="batch_size_1", batch_size=1),
       dict(testcase_name="batch_size_2_uneven", batch_size=2),
       dict(testcase_name="batch_size_3_uneven", batch_size=3),
+      dict(testcase_name="batch_size_equals_n_draws", batch_size=5),
   )
   def test_sample_prior_batch_size_matches_unbatched(self, batch_size: int):
     meridian_unbatched = model.Meridian(
@@ -766,6 +767,60 @@ class PriorDistributionSamplerTest(
           rtol=1e-5,
           atol=1e-5,
           err_msg=f"Mismatch in parameter {key} with batch_size={batch_size}",
+      )
+
+  def test_sample_prior_every_batch_has_the_same_size(self):
+    meridian = model.Meridian(
+        input_data=self.short_input_data_non_media_and_organic,
+        model_spec=spec.ModelSpec(),
+    )
+    batch_draw_counts = []
+
+    def _record_batch_sizes(func):
+      def _wrapped(*draw_args):
+        batch_draw_counts.extend(arg.shape[1] for arg in draw_args)
+        return func(*draw_args)
+
+      return _wrapped
+
+    with mock.patch.object(
+        backend, "compile_temporary_function", side_effect=_record_batch_sizes
+    ) as mock_compile:
+      # 5 draws in batches of 2: the last batch covers draws 3-4, not just 4.
+      meridian.sample_prior(n_draws=5, seed=42, batch_size=2)
+
+    # One compiled function each for `beta_m`, `beta_rf`, `beta_om`,
+    # `beta_orf`, and `gamma_n`.
+    self.assertEqual(mock_compile.call_count, 5)
+    self.assertNotEmpty(batch_draw_counts)
+    self.assertEqual(set(batch_draw_counts), {2})
+
+  def test_sample_prior_compiled_matches_uncompiled(self):
+    meridian_uncompiled = model.Meridian(
+        input_data=self.short_input_data_non_media_and_organic,
+        model_spec=spec.ModelSpec(),
+    )
+    meridian_compiled = model.Meridian(
+        input_data=self.short_input_data_non_media_and_organic,
+        model_spec=spec.ModelSpec(),
+    )
+    with mock.patch.object(
+        backend, "compile_temporary_function", side_effect=lambda func: func
+    ):
+      meridian_uncompiled.sample_prior(n_draws=5, seed=42, batch_size=2)
+    meridian_compiled.sample_prior(n_draws=5, seed=42, batch_size=2)
+
+    uncompiled = meridian_uncompiled.inference_data.prior  # pyrefly: ignore[missing-attribute]
+    compiled = meridian_compiled.inference_data.prior  # pyrefly: ignore[missing-attribute]
+    self.assertEqual(set(compiled.data_vars), set(uncompiled.data_vars))
+    for key in uncompiled.data_vars:
+      # Compilation can change the order of floating-point operations.
+      np.testing.assert_allclose(
+          np.asarray(compiled[key]),
+          np.asarray(uncompiled[key]),
+          rtol=1e-5,
+          atol=1e-6,
+          err_msg=f"Mismatch in parameter {key}",
       )
 
   @parameterized.named_parameters(
