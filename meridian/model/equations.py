@@ -26,6 +26,7 @@ import numbers
 from meridian import backend
 from meridian import constants
 from meridian.model import adstock_hill
+from meridian.model import changepoints
 from meridian.model import context
 
 __all__ = [
@@ -45,19 +46,21 @@ def _solve_coefficient_mean(
   """Solves the coefficient mean from the incremental outcome it implies.
 
   The coefficient in geo `g` (and time period `t`, if there is a time effect) is
-  `beta_x + eta_x * beta_gx_dev[g] + time_effect_tx[t]` for normal random
-  effects, or `exp` of that for log-normal ones. `beta_x` is chosen so that the
-  incremental outcome summed over geos (and time periods) equals
-  `incremental_outcome_x`.
+  `beta_x + eta_x * beta_gx_dev + time_effect_tx` for normal random effects, or
+  `exp` of that for log-normal ones. `beta_x` is chosen so that the incremental
+  outcome summed over geos (and time periods) equals `incremental_outcome_x`.
 
   Args:
     incremental_outcome_x: The incremental outcome, shape `(..., n_channels)`.
     outcome_per_unit: The incremental outcome per unit coefficient, shape `(...,
       n_geos, n_channels)`, or `(..., n_geos, n_times, n_channels)` with a time
-      effect.
-    eta_x: The random effect scale, shape `(..., n_channels)`.
-    beta_gx_dev: The standard-normal geo deviations, shape `(..., n_geos,
-      n_channels)`.
+      effect. This is the term `M_{g,t,m}` of the ROI parameterization, summed
+      over time periods when there is no time effect:
+      https://developers.google.com/meridian/docs/advanced-modeling/roi-mroi-contribution-parameterizations#roi
+    eta_x: The geo random effect standard deviation parameter values, shape
+      `(..., n_channels)`.
+    beta_gx_dev: The latent standard normal parameter values of the geo-level
+      coefficients, shape `(..., n_geos, n_channels)`.
     random_effects_normal: Whether the random effects are normal rather than
       log-normal.
     time_effect_tx: The time effect, shape `(..., n_times, n_channels)`, or
@@ -666,12 +669,12 @@ class ModelEquations:
 
     This is `calculate_beta_x` with the time effect of channels that have
     changepoints. Their coefficient in geo `g` and time period `t` is
-    `exp(beta_x + eta_x * beta_gx_dev[g] + zeta_x * phi_tx[t])`, or the same
-    without `exp` for normal random effects. `beta_x` is chosen so that the
-    incremental outcome over all geos and time periods, including the time
-    effect, equals `incremental_outcome_x`. This keeps ROI, mROI and
-    contribution priors on the whole training period, as for channels without
-    changepoints. All inputs only include the channels with changepoints.
+    `exp(beta_x + eta_x * beta_gx_dev + zeta_x * phi_tx)`, or the same without
+    `exp` for normal random effects. `beta_x` is chosen so that the incremental
+    outcome over all geos and time periods, including the time effect, equals
+    `incremental_outcome_x`. This keeps ROI, mROI and contribution priors on the
+    whole training period, as for channels without changepoints. All inputs
+    only include the channels with changepoints.
 
     Args:
       incremental_outcome_x: The incremental outcome implied by the prior or
@@ -679,10 +682,13 @@ class ModelEquations:
       linear_predictor_counterfactual_difference: The difference between the
         treatment and its counterfactual on the linear predictor scale, shape
         `(..., n_geos, n_times, n_channels)`.
-      eta_x: The random effect scale, shape `(..., n_channels)`.
-      beta_gx_dev: The standard-normal geo deviations, shape `(..., n_geos,
-        n_channels)`.
-      zeta_x: The scale of the time effect, shape `(..., n_channels)`.
+      eta_x: The geo random effect standard deviation parameter values, shape
+        `(..., n_channels)`. "x" represents "m" or "rf".
+      beta_gx_dev: The latent standard normal parameter values of the geo-level
+        coefficients, shape `(..., n_geos, n_channels)`. "x" represents "m" or
+        "rf".
+      zeta_x: The time random effect standard deviation parameter values, shape
+        `(..., n_channels)`. "x" represents "m" or "rf".
       phi_tx: The time effect from `changepoints.expand_intervals`, shape `(...,
         n_times, n_channels)`.
 
@@ -705,6 +711,62 @@ class ModelEquations:
         time_effect_tx=zeta_x[..., backend.newaxis, :] * phi_tx,
     )
 
+  def _merge_time_varying_beta_x(
+      self,
+      *,
+      changepoint_info: changepoints.ChangepointInfo,
+      beta_x: backend.Tensor,
+      incremental_outcome_x: backend.Tensor,
+      linear_predictor_counterfactual_difference: backend.Tensor,
+      eta_x: backend.Tensor,
+      beta_gx_dev: backend.Tensor,
+      zeta_x: backend.Tensor,
+      varphi_x: backend.Tensor,
+  ) -> backend.Tensor:
+    """Re-computes `beta_x` for the channels with changepoints.
+
+    `calculate_beta_x` ignores the time effect. This function replaces the
+    computation of `beta_x` for channels with changepoints with
+    `_calculate_time_varying_beta_x`. "x" represents "m" or "rf".
+
+    Args:
+      changepoint_info: The `ChangepointInfo` of the channel type.
+      beta_x: The `calculate_beta_x` result for all channels of the type, shape
+        `(..., n_channels)`. Here, `n_channels` is the number of all channels
+        of the type, not just the number of channels with changepoints.
+      incremental_outcome_x: As in `calculate_beta_x`, for all channels.
+      linear_predictor_counterfactual_difference: As in `calculate_beta_x`, for
+        all channels.
+      eta_x: As in `calculate_beta_x`, for all channels.
+      beta_gx_dev: As in `calculate_beta_x`, for all channels.
+      zeta_x: The time random effect standard deviation parameter values of the
+        channels with changepoints, shape `(..., n_changepoint_channels)`.
+      varphi_x: The latent standard normal parameter values of the intervals
+        between changepoints, shape `(..., n_changepoint_channels,
+        max_intervals)`.
+
+    Returns:
+      `beta_x` with the columns of the channels with changepoints replaced.
+    """
+    indices = backend.to_tensor(changepoint_info.channel_indices)
+    time_varying_beta_x = self._calculate_time_varying_beta_x(
+        incremental_outcome_x=backend.gather(
+            incremental_outcome_x, indices, axis=-1
+        ),
+        linear_predictor_counterfactual_difference=backend.gather(
+            linear_predictor_counterfactual_difference, indices, axis=-1
+        ),
+        eta_x=backend.gather(eta_x, indices, axis=-1),
+        beta_gx_dev=backend.gather(beta_gx_dev, indices, axis=-1),
+        zeta_x=zeta_x,
+        phi_tx=changepoints.expand_intervals(
+            varphi_x, changepoint_info.weights
+        ),
+    )
+    return changepoints.merge_channels(
+        x=beta_x, sub=time_varying_beta_x, info=changepoint_info
+    )
+
   def _outcome_per_unit_coefficient(
       self,
       linear_predictor_counterfactual_difference: backend.Tensor,
@@ -712,6 +774,11 @@ class ModelEquations:
       sum_over_time: bool,
   ) -> backend.Tensor:
     """Returns the incremental outcome per unit coefficient.
+
+    This is the term `M_{g,t,m}` of the ROI parameterization in
+    https://developers.google.com/meridian/docs/advanced-modeling/roi-mroi-contribution-parameterizations#roi.
+    With `sum_over_time`, as for channels without changepoints, it is summed
+    over time periods.
 
     Args:
       linear_predictor_counterfactual_difference: The difference between the
