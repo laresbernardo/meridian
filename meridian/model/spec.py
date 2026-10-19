@@ -1075,9 +1075,8 @@ class ModelSpec:
 class _ModelSpecWithChangepoints(ModelSpec):
   """A `ModelSpec` with time-varying media effects. Internal only.
 
-  Posterior sampling raises `NotImplementedError` until it supports
-  time-varying media effects, and so does `Analyzer` until it uses each time
-  period's coefficient.
+  `Analyzer` raises `NotImplementedError` for a model with changepoints until
+  it uses each time period's coefficient.
 
   Attributes:
     changepoints: Maps a paid media or reach and frequency channel name to the

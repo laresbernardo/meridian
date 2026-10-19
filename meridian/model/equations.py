@@ -767,6 +767,56 @@ class ModelEquations:
         x=beta_x, sub=time_varying_beta_x, info=changepoint_info
     )
 
+  def _split_time_varying_outcome(
+      self,
+      *,
+      changepoint_info: changepoints.ChangepointInfo,
+      media_transformed: backend.Tensor,
+      beta_gx: backend.Tensor,
+      zeta_x: backend.Tensor,
+      varphi_x: backend.Tensor,
+  ) -> tuple[backend.Tensor, backend.Tensor]:
+    """Computes the outcome of the channels with changepoints separately.
+
+    Args:
+      changepoint_info: The `ChangepointInfo` of the channel type.
+      media_transformed: The adstock and Hill output for all channels of the
+        type, shape `(..., n_geos, n_times, n_channels)`.
+      beta_gx: The geo coefficients of all channels of the type without the time
+        effect, shape `(..., n_geos, n_channels)`.
+      zeta_x: The time random effect standard deviation parameter values of the
+        channels with changepoints, shape `(..., n_changepoint_channels)`.
+      varphi_x: The latent standard normal parameter values of the intervals
+        between changepoints, shape `(..., n_changepoint_channels,
+        max_intervals)`.
+
+    Returns:
+      A tuple of the channels with changepoints' summed contribution to the
+      linear predictor, using each time period's coefficient, shape `(...,
+      n_geos, n_times)`; and `beta_gx` with zeros for those channels, so that
+      the regular calculation leaves them out.
+    """
+    indices = backend.to_tensor(changepoint_info.channel_indices)
+    time_varying_beta_gx = backend.gather(beta_gx, indices, axis=-1)
+    beta_gtx = changepoints.time_varying_coefficients(
+        beta_gx=time_varying_beta_gx,
+        zeta=zeta_x,
+        phi=changepoints.expand_intervals(varphi_x, changepoint_info.weights),
+        # TODO: Use `changepoint_media_effects_dist`.
+        media_effects_dist=self._context.media_effects_dist,
+    )
+    outcome = backend.einsum(
+        "...gtx,...gtx->...gt",
+        backend.gather(media_transformed, indices, axis=-1),
+        beta_gtx,
+    )
+    beta_gx_without = changepoints.merge_channels(
+        x=beta_gx,
+        sub=backend.zeros_like(time_varying_beta_gx),
+        info=changepoint_info,
+    )
+    return outcome, beta_gx_without
+
   def _outcome_per_unit_coefficient(
       self,
       linear_predictor_counterfactual_difference: backend.Tensor,
