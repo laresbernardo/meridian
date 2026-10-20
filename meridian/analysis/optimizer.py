@@ -2787,7 +2787,7 @@ class BudgetOptimizer:
                     use_posterior=use_posterior,
                     new_data=tensors.DataTensors(
                         media=filled_data.media,
-                        reach=new_reach,
+                        reach=new_reach,  # pyrefly: ignore[bad-argument-type]
                         frequency=new_frequency,  # pyrefly: ignore[bad-argument-type]
                         revenue_per_kpi=filled_data.revenue_per_kpi,
                         time=filled_data.time,

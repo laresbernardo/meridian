@@ -4652,7 +4652,7 @@ class Analyzer:
           geo_indices=geo_indices,
           time_indices=time_indices,
           aggregate_times=aggregate_times,
-          time_dims=time_dims,
+          time_dims=time_dims,  # pyrefly: ignore[bad-argument-type]
       )
 
     if not include_rf:
@@ -4675,7 +4675,7 @@ class Analyzer:
           geo_indices=geo_indices,
           time_indices=time_indices,
           aggregate_times=aggregate_times,
-          time_dims=time_dims,
+          time_dims=time_dims,  # pyrefly: ignore[bad-argument-type]
       )
 
     return xr.concat(
