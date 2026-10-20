@@ -2327,6 +2327,86 @@ class InferenceDataTest(
             tau_g=to_tensor(tau_g), gamma_gn=to_tensor(gamma_gn)
         )
 
+  @parameterized.named_parameters(
+      dict(testcase_name="scalar", scale=2.0, batch_broadcast=False),
+      dict(testcase_name="batched", scale=[2.0] * 3, batch_broadcast=False),
+      dict(testcase_name="batch_broadcast", scale=2.0, batch_broadcast=True),
+  )
+  def test_aggregate_baseline_constraint_knot_prior(
+      self, scale: float | Sequence[float], batch_broadcast: bool
+  ):
+    knot_prior = backend.tfd.Normal(
+        np.zeros_like(scale, dtype=backend.np_float_dtype),
+        _cast_dist_arg(scale),
+    )
+    if batch_broadcast:
+      knot_prior = backend.tfd.BatchBroadcast(knot_prior, 3)
+    model_context = context.ModelContext(
+        input_data=self.input_data_with_media_and_rf,
+        model_spec=spec.ModelSpec(
+            prior=prior_distribution.PriorDistribution(knot_values=knot_prior),
+            knots=3,
+            allows_negative_aggregate_baseline=False,
+        ),
+    )
+    constraint = model_context.aggregate_baseline_constraint
+    assert constraint is not None
+    test_utils.assert_allclose(constraint.knot_loc, 0.0)
+    test_utils.assert_allclose(constraint.knot_scale, 2.0)
+
+  def test_aggregate_baseline_constraint_rotated_knot_0_prior(self):
+    model_context = context.ModelContext(
+        input_data=self.input_data_with_media_and_rf,
+        model_spec=spec.ModelSpec(allows_negative_aggregate_baseline=False),
+    )
+    constraint = model_context.aggregate_baseline_constraint
+    assert constraint is not None
+    # Offsets that put the lower bound of the first rotated knot below zero, and
+    # far above it. The default knot prior is `Normal(0, 5)`.
+    expected_low = np.array([-3.0, 500.0])
+    offset = backend.to_tensor(
+        float(np.asarray(constraint.threshold_l))
+        - constraint.knot_norm_w * expected_low,
+        dtype=backend.float_dtype,
+    )
+
+    prior = constraint.rotated_knot_0_prior(offset)
+
+    self.assertEqual(prior.name, constants.ROTATED_KNOT_0)
+    test_utils.assert_allclose(prior.loc, 0.0)
+    test_utils.assert_allclose(prior.scale, 5.0)
+    test_utils.assert_allclose(prior.low, expected_low, rtol=1e-5, atol=1e-3)
+    # The upper bound is 50 knot prior scales above the lower bound, but at
+    # least 50 scales above zero.
+    test_utils.assert_allclose(
+        prior.high, [250.0, 750.0], rtol=1e-5, atol=1e-3
+    )
+
+  @parameterized.named_parameters(
+      dict(testcase_name="one_knot", n_knots=1),
+      dict(testcase_name="five_knots", n_knots=5),
+  )
+  def test_aggregate_baseline_constraint_rotated_knot_rest_prior(
+      self, n_knots: int
+  ):
+    model_context = context.ModelContext(
+        input_data=self.input_data_with_media_and_rf,
+        model_spec=spec.ModelSpec(
+            knots=n_knots, allows_negative_aggregate_baseline=False
+        ),
+    )
+    constraint = model_context.aggregate_baseline_constraint
+    assert constraint is not None
+
+    prior = constraint.rotated_knot_rest_prior()
+
+    if n_knots == 1:
+      self.assertIsNone(prior)
+    else:
+      assert prior is not None
+      self.assertEqual(prior.name, constants.ROTATED_KNOT_REST)
+      self.assertEqual(tuple(prior.event_shape), (n_knots - 1,))
+
   def test_init_revalidates_mutated_knot_values_prior(self):
     model_spec = spec.ModelSpec(allows_negative_aggregate_baseline=False)
     model_spec.prior.knot_values = backend.tfd.Uniform(

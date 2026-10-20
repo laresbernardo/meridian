@@ -445,41 +445,11 @@ def _joint_dist_base_logic(
         gamma_gn=gamma_gn,
         non_media_baseline_normalized=non_media_baseline_normalized,
     )
-
-    knot_dist = prior_broadcast.knot_values
-    while isinstance(knot_dist, backend.tfd.BatchBroadcast):
-      knot_dist = knot_dist.distribution
-    assert isinstance(knot_dist, backend.tfd.Normal)
-    knot_dtype = knot_dist.dtype
-    knot_scale_val = float(np.reshape(np.asarray(knot_dist.scale), -1)[0])
-    knot_loc_val = float(np.reshape(np.asarray(knot_dist.loc), -1)[0])
-    knot_scale = backend.to_tensor(knot_scale_val, dtype=knot_dtype)
-    knot_loc = backend.to_tensor(knot_loc_val, dtype=knot_dtype)
-
-    low = backend.cast(
-        backend.divide(
-            baseline_constraint.threshold_l - offset,
-            baseline_constraint.knot_norm_w,
-        ),
-        dtype=knot_dtype,
-    )
-    high = backend.cast(
-        backend.maximum(low + 50.0 * knot_scale, 50.0 * knot_scale),
-        dtype=knot_dtype,
-    )
-    rotated_knot_0 = yield backend.tfd.TruncatedNormal(
-        loc=knot_loc,
-        scale=knot_scale,
-        low=low,
-        high=high,
-        name=constants.ROTATED_KNOT_0,
-    )
-    if knot_info.n_knots > 1:
-      rotated_knot_rest = yield backend.tfd.Sample(
-          backend.tfd.Normal(loc=knot_loc, scale=knot_scale),
-          [knot_info.n_knots - 1],
-          name=constants.ROTATED_KNOT_REST,
-      )
+    knot_dtype = baseline_constraint.knot_scale.dtype
+    rotated_knot_0 = yield baseline_constraint.rotated_knot_0_prior(offset)
+    rotated_knot_rest_prior = baseline_constraint.rotated_knot_rest_prior()
+    if rotated_knot_rest_prior is not None:
+      rotated_knot_rest = yield rotated_knot_rest_prior
       rotated_knots = backend.concatenate(
           [backend.expand_dims(rotated_knot_0, -1), rotated_knot_rest],
           axis=-1,
