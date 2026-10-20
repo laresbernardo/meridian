@@ -279,10 +279,72 @@ class BaselineCheck(
 # ==============================================================================
 # Check: Bayesian Posterior Predictive P-value
 # ==============================================================================
+def _two_sided_normal_mixture_p_value(
+    observed: float, means: np.ndarray, stddevs: np.ndarray
+) -> float:
+  """Computes a two-sided p-value under an equal-weight mixture of normals.
+
+  Each mixture component corresponds to one posterior draw `s` and is normal
+  with mean `means[s]` and standard deviation `stddevs[s]`. With
+  `center = mean(means)` and `distance = |observed - center|`, the p-value is
+  the probability that a draw from the mixture lands at least `distance` away
+  from `center`:
+
+    mean_s(Phi((center - distance - means[s]) / stddevs[s])
+           + Phi((means[s] - center - distance) / stddevs[s])),
+
+  where `Phi` is the standard normal CDF. Computing this probability exactly,
+  rather than estimating it from random draws, makes the result deterministic.
+  A component with a zero standard deviation is a point mass, and contributes 1
+  if `|means[s] - center| >= distance` and 0 otherwise. A NaN standard deviation
+  makes the result NaN.
+
+  Args:
+    observed: The observed value of the test statistic.
+    means: The mean of each mixture component.
+    stddevs: The non-negative standard deviation of each mixture component, with
+      the same shape as `means`.
+
+  Returns:
+    The two-sided p-value.
+
+  Raises:
+    ValueError: If `means` and `stddevs` have different shapes.
+  """
+  if means.shape != stddevs.shape:
+    raise ValueError(
+        "`means` and `stddevs` must have the same shape, got"
+        f" {means.shape} and {stddevs.shape}."
+    )
+  center = np.mean(means)
+  distance = np.abs(observed - center)
+  with np.errstate(divide="ignore", invalid="ignore"):
+    tail_probability = scipy_stats.norm.cdf(
+        (center - distance - means) / stddevs
+    ) + scipy_stats.norm.cdf((means - center - distance) / stddevs)
+  point_mass_tail_probability = np.abs(means - center) >= distance
+  # Select on `stddevs == 0` rather than `stddevs > 0` so that a NaN standard
+  # deviation propagates to the result instead of being read as a point mass.
+  tail_probability = np.where(
+      stddevs == 0, point_mass_tail_probability, tail_probability
+  )
+  return float(np.mean(tail_probability))
+
+
 class BayesianPPPCheck(
     BaseCheck[configs.BayesianPPPConfig, results.BayesianPPPCheckResult]
 ):
-  """Checks for Bayesian Posterior Predictive P-value."""
+  """Checks the Bayesian posterior predictive p-value of the total outcome.
+
+  The test statistic is the outcome summed over the selected geos and times.
+  For each posterior draw, the model's predictive distribution of this total is
+  normal, with mean equal to the expected total outcome and variance equal to
+  the summed residual variance of the selected geo and time cells. The check
+  computes the two-sided posterior predictive p-value in closed form: the
+  average, over posterior draws, of the probability that a predictive total
+  lands at least as far from the posterior predictive mean as the observed
+  total. The check fails if the p-value is below `ppp_threshold`.
+  """
 
   def _calculate_total_sigma(self) -> np.ndarray:
     """Calculates the standard deviation of the aggregate total outcome noise.
@@ -305,9 +367,9 @@ class BayesianPPPCheck(
     the aggregate variance is computed analytically:
     total_var_s = sum_{g, t} (sigma_{s, g} * weight_{g, t})^2
 
-    Simulating directly on the aggregate sum via N(total_outcome_expected,
-    sqrt(total_var)) is mathematically identical to simulating each individual
-    cell and summing them. This is more efficient.
+    Working with the aggregate sum, distributed as N(total_outcome_expected,
+    total_var), is equivalent to working with each individual cell and summing
+    them, and is more efficient.
 
     Returns:
       A 1D numpy array representing the total residual standard deviation across
@@ -372,7 +434,9 @@ class BayesianPPPCheck(
             aggregate_times=False,
         )
     )
-    total_outcome_actual = np.sum(total_actual_outcome_filtered)
+    total_outcome_actual = float(
+        np.sum(np.asarray(total_actual_outcome_filtered, dtype=np.float64))
+    )
 
     total_outcome_posterior = analyzer.expected_outcome(
         aggregate_times=True,
@@ -380,23 +444,14 @@ class BayesianPPPCheck(
         selected_geos=self._selected_geos,
         selected_times=self._selected_times,
     )
-    total_outcome_expected = np.asarray(total_outcome_posterior).flatten()
-    total_sigma = self._calculate_total_sigma()
-
-    total_outcome_posterior_predictive = np.random.normal(
-        total_outcome_expected, total_sigma
-    )
-    total_outcome_posterior_predictive_mean = np.mean(
-        total_outcome_posterior_predictive
-    )
-    bayesian_ppp = np.mean(
-        np.abs(
-            total_outcome_posterior_predictive
-            - total_outcome_posterior_predictive_mean
-        )
-        >= np.abs(
-            total_outcome_actual - total_outcome_posterior_predictive_mean
-        )
+    total_outcome_expected = np.asarray(
+        total_outcome_posterior, dtype=np.float64
+    ).flatten()
+    total_sigma = np.asarray(self._calculate_total_sigma(), dtype=np.float64)
+    bayesian_ppp = _two_sided_normal_mixture_p_value(
+        observed=total_outcome_actual,
+        means=total_outcome_expected,
+        stddevs=total_sigma,
     )
 
     if bayesian_ppp >= self._config.ppp_threshold:

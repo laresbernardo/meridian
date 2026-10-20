@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from collections.abc import Callable, Sequence
+import statistics
 from unittest import mock
 
 from absl.testing import absltest
@@ -1035,6 +1036,24 @@ def _mock_filter_and_aggregate(
   return tensor
 
 
+def _reference_two_sided_ppp(
+    observed: float, means: np.ndarray, stddevs: np.ndarray
+) -> float:
+  """Computes the two-sided PPP with `statistics.NormalDist` as a reference."""
+  center = float(np.mean(means))
+  distance = abs(observed - center)
+  tail_probabilities = []
+  for mean, stddev in zip(np.ravel(means), np.ravel(stddevs), strict=True):
+    if stddev == 0:
+      tail_probabilities.append(float(abs(mean - center) >= distance))
+    else:
+      normal = statistics.NormalDist(mu=float(mean), sigma=float(stddev))
+      tail_probabilities.append(
+          normal.cdf(center - distance) + 1.0 - normal.cdf(center + distance)
+      )
+  return float(np.mean(tail_probabilities))
+
+
 class BayesianPPPCheckTest(parameterized.TestCase):
 
   def setUp(self):
@@ -1146,11 +1165,9 @@ class BayesianPPPCheckTest(parameterized.TestCase):
         selected_times=["time1"],
     )
 
-  @mock.patch.object(np.random, "normal", autospec=True, spec_set=True)
-  def test_bayesian_ppp_check_predictive_distribution(
-      self, mock_random_normal
-  ):
-    self.model_context.input_data.kpi = np.array([10, 20])
+  def test_bayesian_ppp_matches_closed_form(self):
+    # Observed total is 10 + 26 = 36, and the posterior predictive mean is 30.
+    self.model_context.input_data.kpi = np.array([10.0, 26.0])
     expected_outcome = np.array([25.0, 35.0])
     sigma = np.array([[1.0, 2.0]])
     self.analyzer.expected_outcome.return_value = expected_outcome
@@ -1158,15 +1175,13 @@ class BayesianPPPCheckTest(parameterized.TestCase):
         lambda tensor, **kwargs: tensor
     )
     self.inference_data.posterior = {constants.SIGMA: sigma}
-    mock_random_normal.return_value = expected_outcome
 
-    check = checks.BayesianPPPCheck(
+    result = checks.BayesianPPPCheck(
         model_context=self.model_context,
         inference_data=self.inference_data,
         analyzer=self.analyzer,
         config=self.config,
-    )
-    check.run()
+    ).run()
 
     self.analyzer.expected_outcome.assert_called_once_with(
         aggregate_times=True,
@@ -1174,16 +1189,231 @@ class BayesianPPPCheckTest(parameterized.TestCase):
         selected_geos=None,
         selected_times=None,
     )
-    np.testing.assert_array_equal(
-        mock_random_normal.call_args[0][0], expected_outcome
-    )
+    # Two unit-population cells give a total sigma of sigma * sqrt(2).
     expected_total_sigma = np.array([np.sqrt(2.0), 2.0 * np.sqrt(2.0)])
-    np.testing.assert_allclose(
-        mock_random_normal.call_args[0][1], expected_total_sigma
+    self.assertAlmostEqual(
+        result.details[results.constants.BAYESIAN_PPP],
+        _reference_two_sided_ppp(36.0, expected_outcome, expected_total_sigma),
+    )
+    self.assertEqual(result.case, results.BayesianPPPCases.PASS)
+
+  def test_bayesian_ppp_mixes_point_mass_and_normal_draws(self):
+    # Observed total is 36 and the posterior predictive mean is 30. The first
+    # draw has zero sigma and lies within 6 of the mean, so it contributes 0.
+    self.model_context.input_data.kpi = np.array([10.0, 26.0])
+    expected_outcome = np.array([25.0, 35.0])
+    self.analyzer.expected_outcome.return_value = expected_outcome
+    self.analyzer.filter_and_aggregate_geos_and_times.side_effect = (
+        lambda tensor, **kwargs: tensor
+    )
+    self.inference_data.posterior = {constants.SIGMA: np.array([[0.0, 1.0]])}
+
+    result = checks.BayesianPPPCheck(
+        model_context=self.model_context,
+        inference_data=self.inference_data,
+        analyzer=self.analyzer,
+        config=self.config,
+    ).run()
+
+    self.assertAlmostEqual(
+        result.details[results.constants.BAYESIAN_PPP],
+        _reference_two_sided_ppp(
+            36.0, expected_outcome, np.array([0.0, np.sqrt(2.0)])
+        ),
+    )
+
+  def test_bayesian_ppp_fails_when_sigma_is_nan(self):
+    self.model_context.input_data.kpi = np.array([10.0, 26.0])
+    self.analyzer.expected_outcome.return_value = np.array([25.0, 35.0])
+    self.analyzer.filter_and_aggregate_geos_and_times.side_effect = (
+        lambda tensor, **kwargs: tensor
+    )
+    self.inference_data.posterior = {
+        constants.SIGMA: np.array([[np.nan, 1.0]])
+    }
+
+    result = checks.BayesianPPPCheck(
+        model_context=self.model_context,
+        inference_data=self.inference_data,
+        analyzer=self.analyzer,
+        config=self.config,
+    ).run()
+
+    self.assertTrue(np.isnan(result.details[results.constants.BAYESIAN_PPP]))
+    self.assertEqual(result.case, results.BayesianPPPCases.FAIL)
+
+  def test_two_sided_normal_mixture_p_value_rejects_mismatched_shapes(self):
+    with self.assertRaisesRegex(ValueError, "must have the same shape"):
+      checks._two_sided_normal_mixture_p_value(
+          observed=36.0,
+          means=np.array([25.0, 35.0]),
+          stddevs=np.array([[1.0], [2.0]]),
+      )
+
+  def test_bayesian_ppp_is_deterministic(self):
+    self.model_context.input_data.kpi = np.array([50.0, 62.0])
+    rng = np.random.default_rng(seed=0)
+    self.analyzer.expected_outcome.return_value = rng.normal(
+        100.0, 5.0, size=(1, 100)
+    )
+    self.analyzer.filter_and_aggregate_geos_and_times.side_effect = (
+        lambda tensor, **kwargs: tensor
+    )
+    self.inference_data.posterior = {
+        constants.SIGMA: rng.uniform(5.0, 10.0, size=(1, 100))
+    }
+    check = checks.BayesianPPPCheck(
+        model_context=self.model_context,
+        inference_data=self.inference_data,
+        analyzer=self.analyzer,
+        config=self.config,
+    )
+
+    np.random.seed(0)
+    global_state_before = np.random.get_state()
+    first_ppp = check.run().details[results.constants.BAYESIAN_PPP]
+    global_state_after = np.random.get_state()
+    np.random.seed(1)
+    second_ppp = check.run().details[results.constants.BAYESIAN_PPP]
+
+    self.assertEqual(first_ppp, second_ppp)
+    # The check neither draws from nor reseeds NumPy's global random state.
+    np.testing.assert_array_equal(global_state_before[1], global_state_after[1])
+    self.assertEqual(global_state_before[2], global_state_after[2])
+
+  def test_bayesian_ppp_matches_monte_carlo_estimate(self):
+    # Observed total is 50 + 62 = 112.
+    self.model_context.input_data.kpi = np.array([50.0, 62.0])
+    n_draws = 200
+    rng = np.random.default_rng(seed=0)
+    expected_outcome = rng.normal(100.0, 5.0, size=(1, n_draws))
+    sigma = rng.uniform(5.0, 10.0, size=(1, n_draws))
+    self.analyzer.expected_outcome.return_value = expected_outcome
+    self.analyzer.filter_and_aggregate_geos_and_times.side_effect = (
+        lambda tensor, **kwargs: tensor
+    )
+    self.inference_data.posterior = {constants.SIGMA: sigma}
+
+    result = checks.BayesianPPPCheck(
+        model_context=self.model_context,
+        inference_data=self.inference_data,
+        analyzer=self.analyzer,
+        config=self.config,
+    ).run()
+
+    # Simulate many replicates of one predictive draw per posterior draw, and
+    # count draws at least as far from their replicate's mean as the observed
+    # total.
+    total_sigma = sigma.flatten() * np.sqrt(2.0)
+    simulated_totals = rng.normal(
+        expected_outcome.flatten(), total_sigma, size=(5000, n_draws)
+    )
+    replicate_means = np.mean(simulated_totals, axis=1, keepdims=True)
+    monte_carlo_ppp = np.mean(
+        np.abs(simulated_totals - replicate_means)
+        >= np.abs(112.0 - replicate_means)
+    )
+    self.assertAlmostEqual(
+        result.details[results.constants.BAYESIAN_PPP],
+        monte_carlo_ppp,
+        delta=0.005,
+    )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="national_kpi",
+          n_geos=1,
+          use_revenue=False,
+          unique_sigma=False,
+      ),
+      dict(
+          testcase_name="national_revenue",
+          n_geos=1,
+          use_revenue=True,
+          unique_sigma=False,
+      ),
+      dict(
+          testcase_name="geo_kpi_shared_sigma",
+          n_geos=3,
+          use_revenue=False,
+          unique_sigma=False,
+      ),
+      dict(
+          testcase_name="geo_revenue_geo_sigma",
+          n_geos=3,
+          use_revenue=True,
+          unique_sigma=True,
+      ),
+  )
+  def test_bayesian_ppp_matches_closed_form_for_national_and_geo_models(
+      self, n_geos, use_revenue, unique_sigma
+  ):
+    rng = np.random.default_rng(seed=0)
+    n_chains, n_draws, n_times = 2, 50, 4
+    geos = [f"geo_{i}" for i in range(n_geos)]
+    kpi = rng.uniform(50.0, 100.0, (n_geos, n_times))
+    pop = np.linspace(100.0, 500.0, n_geos) if n_geos > 1 else np.array([1.0])
+    price = rng.uniform(1.5, 2.5, (n_geos, n_times)) if use_revenue else None
+
+    model_context = mock.create_autospec(
+        spec=context.ModelContext, spec_set=True, instance=True
+    )
+    model_context.kpi_transformer = transformers.KpiTransformer(
+        kpi=backend.to_tensor(kpi),
+        population=backend.to_tensor(pop),
+    )
+    model_context.population = pop
+    model_context.input_data.kpi = kpi
+    model_context.input_data.revenue_per_kpi = price
+
+    if unique_sigma:
+      sigma_da = xr.DataArray(
+          rng.uniform(0.1, 0.3, (n_chains, n_draws, n_geos)),
+          dims=["chain", "draw", "geo"],
+          coords={"geo": geos},
+      )
+    else:
+      sigma_da = xr.DataArray(
+          rng.uniform(0.1, 0.3, (n_chains, n_draws)),
+          dims=["chain", "draw"],
+      )
+    inference_data = mock.create_autospec(
+        spec=az.InferenceData, spec_set=False, instance=True
+    )
+    inference_data.posterior = {constants.SIGMA: sigma_da}
+
+    analyzer = mock.create_autospec(
+        spec=analyzer_module.Analyzer, spec_set=True, instance=True
+    )
+    analyzer.filter_and_aggregate_geos_and_times.side_effect = (
+        _mock_filter_and_aggregate
+    )
+    check = checks.BayesianPPPCheck(
+        model_context=model_context,
+        inference_data=inference_data,
+        analyzer=analyzer,
+        config=configs.BayesianPPPConfig(),
+    )
+    total_sigma = check._calculate_total_sigma()
+    observed_total = float(np.sum(kpi * price if price is not None else kpi))
+    # Center the expected totals one total sigma above the observed total.
+    expected_outcome = rng.normal(
+        observed_total + np.mean(total_sigma),
+        np.mean(total_sigma),
+        size=(n_chains, n_draws),
+    )
+    analyzer.expected_outcome.return_value = expected_outcome
+
+    result = check.run()
+
+    # The outcome is float32 when JAX runs without x64, so allow for rounding.
+    self.assertAlmostEqual(
+        result.details[results.constants.BAYESIAN_PPP],
+        _reference_two_sided_ppp(observed_total, expected_outcome, total_sigma),
+        delta=1e-6,
     )
 
   def test_bayesian_ppp_is_larger_when_sigma_is_larger(self):
-    np.random.seed(0)
     self.model_context.input_data.kpi = np.array([50.0, 50.0])
     expected_outcome = np.full((1, 1000), 80.0)
     self.analyzer.expected_outcome.return_value = expected_outcome

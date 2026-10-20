@@ -23,6 +23,12 @@ To release a new version (e.g. from `1.0.0` -> `2.0.0`):
 
 ## [Unreleased]
 
+*   `BayesianPPPCheck` now computes the posterior predictive p-value in closed
+    form from the normal predictive distribution of the total outcome for each
+    posterior draw, instead of simulating one replicated total outcome per
+    posterior draw. The p-value no longer varies between runs on the same
+    model. Models with a p-value close to `ppp_threshold` may get a different
+    check result than in earlier versions.
 *   Fix `ModelReviewer` failing on models that use ROI priors for only some
     channel types (e.g. ROI priors for media channels and mROI priors for reach
     and frequency channels). The ROI Consistency, Prior-Posterior Shift,
