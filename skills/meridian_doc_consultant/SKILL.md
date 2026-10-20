@@ -1,7 +1,7 @@
 ---
 name: meridian-doc-consultant
 description: >-
-  Assists users with questions about Meridian Marketing Mix Modeling concepts, parameters, and best practices by finding and consulting the relevant documentation on developers.google.com/meridian. Use when the user asks for explanations or guidance on Meridian topics. Don't use for writing code or running models directly.
+  Assists users with questions about Meridian Marketing Mix Modeling and Meridian GeoX geo-experiment concepts, parameters, and best practices by finding and consulting the relevant documentation on developers.google.com/meridian. Use when the user asks for explanations or guidance on Meridian MMM or GeoX topics. Don't use for writing code or running models directly.
 ---
 
 # Meridian Documentation Consultant
@@ -10,8 +10,10 @@ This skill guides the agent in finding and consulting the right page of the
 official Meridian documentation to answer user questions token-efficiently.
 
 The documentation is published at `https://developers.google.com/meridian/`. It
-is **not** included in the Meridian GitHub repository or the `google-meridian`
-Python package, so do not look for documentation files on disk.
+covers both Meridian MMM (`/meridian/docs/...`) and Meridian GeoX geo
+experiments (`/meridian/geox/...`). It is **not** included in the Meridian
+GitHub repository or the `google-meridian` Python package, so do not look for
+documentation files on disk.
 
 ## Core Workflow
 
