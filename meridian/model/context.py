@@ -105,7 +105,7 @@ def _nearest_coordinates_hint(
   nearest = [str(d) for d in earlier[-1:] + later[:1]]
   if not nearest:
     return ""
-  return f" The nearest are {' and '.join(nearest)}."
+  return f" The nearest time coordinates are {' and '.join(nearest)}."
 
 
 def _compile_date_range_mask(
@@ -423,6 +423,30 @@ def _mask_to_geo_holdout_specs(
   return geo_specs
 
 
+def _changepoint_calibration_error(
+    channels: Sequence[str], attribute: str
+) -> ValueError:
+  """Returns the error for ROI calibration of channels with changepoints."""
+  channel_list = list(channels)
+  example = channels[0]
+  verb = "has" if len(channels) == 1 else "have"
+  return ValueError(
+      "ROI calibration is not supported for channels with `changepoints`."
+      f" `{attribute}` sets a calibration period for {channel_list}, which also"
+      f" {verb} `changepoints`.\n"
+      "To calibrate ROI for channels with changepoints, first, partition the"
+      " data manually by dividing the channel into distinct periods and"
+      " modeling each as a separate channel without changepoints. For example,"
+      f" replace {example!r} with '{example}_1' and '{example}_2', each having"
+      " spend and media only during its respective period. Then, calibrate"
+      " each resulting channel with the experiment corresponding to that time"
+      " period.\n"
+      "Alternatively, if you want to model the channel with time-varying"
+      " media effectiveness without ROI calibration, keep `changepoints` and"
+      f" remove {channel_list} from `{attribute}`."
+  )
+
+
 def _compile_changepoints(
     changepoints_spec: Mapping[str, Sequence[datetime.date]],
     *,
@@ -454,8 +478,8 @@ def _compile_changepoints(
       continue
     if channel in other_channels:
       raise ValueError(
-          f"Channel {channel!r} is an organic or non-media channel. Only paid"
-          " media and RF channels can have changepoints."
+          f"Channel {channel!r} is an organic media or a non-media treatment."
+          " Only paid media and RF channels can have changepoints."
       )
     raise ValueError(
         f"Channel {channel!r} in `changepoints` is not a paid media or RF"
@@ -470,10 +494,17 @@ def _compile_changepoints(
     indices = []
     for date in changepoints_spec[channel]:
       if date not in index_of:
+        if date < dates[0] or date > dates[-1]:
+          hint = (
+              f" The time periods in the data are between {dates[0]} and"
+              f" {dates[-1]} (inclusive)."
+          )
+        else:
+          hint = _nearest_coordinates_hint(date, dates)
         raise ValueError(
             f"The changepoint {date} of channel {channel!r} is not one of the"
             " input data's time coordinates."
-            + _nearest_coordinates_hint(date, dates)
+            + hint
         )
       if index_of[date] == 0:
         raise ValueError(
@@ -536,6 +567,7 @@ class ModelContext:
     self._validate_data_dependent_model_spec()
     self._validate_model_spec_shapes()
     self._resolve_declarative_model_spec()
+    self._validate_changepoint_calibration()
 
     self._set_total_media_contribution_prior = False
     self._warn_setting_ignored_priors()
@@ -1792,6 +1824,47 @@ class ModelContext:
             + self._coordinate_names(self._input_data.non_media_channel)
         ),
     )
+
+  def _validate_changepoint_calibration(self) -> None:
+    """Rejects ROI calibration periods for channels with changepoints.
+
+    Raises:
+      ValueError: If an ROI calibration period restricts a channel with
+        changepoints to part of the media time periods.
+    """
+    if not self._changepoints:
+      return
+    for calibration_period, channel_coordinate, legacy, declarative in (
+        (
+            self.compiled_roi_calibration_period,
+            self._input_data.media_channel,
+            "roi_calibration_period",
+            "roi_calibration",
+        ),
+        (
+            self.compiled_rf_roi_calibration_period,
+            self._input_data.rf_channel,
+            "rf_roi_calibration_period",
+            "rf_roi_calibration",
+        ),
+    ):
+      if calibration_period is None:
+        continue
+      channels = [
+          name
+          for index, name in enumerate(
+              self._coordinate_names(channel_coordinate)
+          )
+          if name in self._changepoints
+          and not np.all(calibration_period[:, index])
+      ]
+      if channels:
+        attribute = (
+            legacy
+            if getattr(self._model_spec, legacy) is not None
+            else declarative
+        )
+        raise _changepoint_calibration_error(channels, attribute)
 
   @functools.cached_property
   def _changepoint_max_intervals(self) -> int:

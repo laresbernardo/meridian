@@ -15,6 +15,7 @@
 from collections.abc import Callable, Collection, Mapping, Sequence
 import dataclasses
 import datetime
+import re
 import types
 from typing import Any
 from unittest import mock
@@ -2473,7 +2474,7 @@ class CompiledModelSpecTest(
         ),
     )
     with self.assertRaisesRegex(
-        ValueError, f"nearest are {dates[10]} and {dates[11]}"
+        ValueError, f"nearest time coordinates are {dates[10]} and {dates[11]}"
     ):
       _ = self._context(data, model_spec).compiled_roi_calibration_period
 
@@ -3724,6 +3725,79 @@ class ChangepointsTest(
         ],
     )
 
+  def _calibration(self, *channels: str) -> spec.CalibrationSpec:
+    """Calibrates `channels`, or every channel if none, on part of the data."""
+    dates = self.input_data_with_media_and_rf.media_time_coordinates.all_dates
+    date_ranges = [spec.DateRange(dates[10], dates[20])]
+    if not channels:
+      return spec.CalibrationSpec(spec=date_ranges)
+    return spec.CalibrationSpec(
+        spec=[spec.ChannelCalibrationSpec(list(channels), date_ranges)]
+    )
+
+  @parameterized.named_parameters(
+      ("media_channel", "roi_calibration", "media"),
+      ("all_channels", "roi_calibration", None),
+      ("rf_channel", "rf_roi_calibration", "rf"),
+  )
+  def test_roi_calibration_of_channel_with_changepoints_raises(
+      self, attribute: str, channel_type: str | None
+  ):
+    if channel_type is None:
+      calibration = self._calibration()
+      expected = [self.media[1]]
+    else:
+      channel = self.media[1] if channel_type == "media" else self.rf[0]
+      calibration = self._calibration(channel)
+      expected = [channel]
+    changepoints_spec = {
+        self.media[1]: [self.dates[50]],
+        self.rf[0]: [self.dates[50]],
+    }
+    if attribute == "roi_calibration":
+      model_spec = _ModelSpecWithChangepoints(
+          changepoints=changepoints_spec, roi_calibration=calibration
+      )
+    else:
+      model_spec = _ModelSpecWithChangepoints(
+          changepoints=changepoints_spec, rf_roi_calibration=calibration
+      )
+    with self.assertRaisesRegex(
+        ValueError,
+        "ROI calibration is not supported for channels with `changepoints`.*"
+        + re.escape(f"`{attribute}` sets a calibration period for {expected}"),
+    ):
+      self._context(model_spec)
+
+  def test_legacy_roi_calibration_period_of_channel_with_changepoints_raises(
+      self,
+  ):
+    data = self.input_data_with_media_and_rf
+    period = np.ones((len(data.media_time), len(self.media)), dtype=bool)
+    period[:10, 1] = False
+    model_spec = _ModelSpecWithChangepoints(
+        changepoints={self.media[1]: [self.dates[50]]},
+        roi_calibration_period=period,
+    )
+    with self.assertRaisesRegex(
+        ValueError, "`roi_calibration_period` sets a calibration period"
+    ):
+      self._context(model_spec)
+
+  def test_roi_calibration_of_other_channels_is_allowed(self):
+    model_spec = _ModelSpecWithChangepoints(
+        changepoints={self.media[1]: [self.dates[50]]},
+        roi_calibration=self._calibration(self.media[0]),
+        # A period that covers every media time period doesn't restrict it.
+        rf_roi_calibration=spec.CalibrationSpec(spec=[spec.DateRange()]),
+    )
+    calibration_period = self._context(
+        model_spec
+    ).compiled_roi_calibration_period
+    assert calibration_period is not None
+    self.assertFalse(np.all(calibration_period[:, 0]))
+    self.assertTrue(np.all(calibration_period[:, 1]))
+
   def test_only_media_channels_have_changepoints(self):
     model_context = self._context(
         _ModelSpecWithChangepoints(
@@ -3745,7 +3819,7 @@ class ChangepointsTest(
     data = self.input_data_non_media_and_organic
     assert data.organic_media_channel is not None
     organic = str(data.organic_media_channel.values[0])
-    with self.assertRaisesRegex(ValueError, "organic or non-media channel"):
+    with self.assertRaisesRegex(ValueError, "organic media or a non-media"):
       self._context(
           _ModelSpecWithChangepoints(
               changepoints={organic: [data.time_coordinates.all_dates[5]]}
@@ -3857,17 +3931,29 @@ class CompileChangepointsTest(parameterized.TestCase):
     self.assertEqual(self._compile({}), {})
 
   @parameterized.named_parameters(
-      ("organic_channel", {"Organic": [_week(1)]}, "organic or non-media"),
+      ("organic_channel", {"Organic": [_week(1)]}, "organic media or a non"),
       ("unknown_channel", {"Radio": [_week(1)]}, "not a paid media or RF"),
       (
           "not_a_time_coordinate",
           {"TV": [datetime.date(2024, 1, 9)]},
-          "time coordinates. The nearest are 2024-01-08 and 2024-01-15.",
+          (
+              "time coordinates. The nearest time coordinates are 2024-01-08"
+              " and 2024-01-15."
+          ),
       ),
       (
           "before_the_data",
           {"TV": [datetime.date(2023, 12, 25)]},
-          "not one of the input data's time coordinates",
+          (
+              "not one of the input data's time coordinates. The time periods"
+              " in the data are between 2024-01-01 and 2024-01-29"
+              r" \(inclusive\)."
+          ),
+      ),
+      (
+          "after_the_data",
+          {"TV": [datetime.date(2024, 2, 5)]},
+          "The time periods in the data are between 2024-01-01 and 2024-01-29",
       ),
       ("first_date", {"TV": [_week(0)]}, "is the first time coordinate"),
       ("duplicate", {"TV": [_week(1), _week(1)]}, "more than once"),
