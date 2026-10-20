@@ -23,6 +23,8 @@ To release a new version (e.g. from `1.0.0` -> `2.0.0`):
 
 ## [Unreleased]
 
+*   Fix calibrated ROI priors so that each candidate distribution minimizes the
+    cross-entropy loss against the numerical posterior, as documented.
 *   `BayesianPPPCheck` now computes the posterior predictive p-value in closed
     form from the normal predictive distribution of the total outcome for each
     posterior draw, instead of simulating one replicated total outcome per
