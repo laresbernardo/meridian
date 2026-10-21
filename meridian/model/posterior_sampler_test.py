@@ -2847,6 +2847,10 @@ class TimeVaryingPosteriorTest(
           constants.MEDIA_EFFECTS_LOG_NORMAL,
           constants.MEDIA_EFFECTS_NORMAL,
       ),
+      changepoint_media_effects_dist=(
+          constants.MEDIA_EFFECTS_LOG_NORMAL,
+          constants.MEDIA_EFFECTS_NORMAL,
+      ),
       is_rf=(False, True),
   )
   def test_outcome_uses_each_time_periods_coefficient(
@@ -2854,6 +2858,7 @@ class TimeVaryingPosteriorTest(
       prior_type: str,
       allows_negative_aggregate_baseline: bool,
       media_effects_dist: str,
+      changepoint_media_effects_dist: str,
       is_rf: bool,
   ):
     if is_rf:
@@ -2877,6 +2882,7 @@ class TimeVaryingPosteriorTest(
                 allows_negative_aggregate_baseline
             ),
             media_effects_dist=media_effects_dist,
+            changepoint_media_effects_dist=changepoint_media_effects_dist,
             # With no noise, `y` is the linear predictor.
             prior=_PriorDistributionWithChangepoints(
                 sigma=backend.tfd.Deterministic(backend.np_float_dtype(0.0)),
@@ -2937,6 +2943,29 @@ class TimeVaryingPosteriorTest(
       )
       beta_gx, zeta, varphi = sample.beta_gm, sample.zeta_m, sample.varphi_m
       roi_name, prior_denominator = "roi_m", media_tensors.prior_denominator
+    # Each channel's coefficients use its random effects distribution.
+    beta_dev = sample.beta_grf_dev if is_rf else sample.beta_gm_dev
+    beta = sample.beta_rf if is_rf else sample.beta_m
+    eta = sample.eta_rf if is_rf else sample.eta_m
+    beta_eta_combined = (
+        np.asarray(beta)[:, np.newaxis, :]
+        + np.asarray(eta)[:, np.newaxis, :] * np.asarray(beta_dev)
+    )
+    expected_beta_gx = (
+        beta_eta_combined.copy()
+        if media_effects_dist == constants.MEDIA_EFFECTS_NORMAL
+        else np.exp(beta_eta_combined)
+    )
+    changepoint_normal = (
+        changepoint_media_effects_dist == constants.MEDIA_EFFECTS_NORMAL
+    )
+    expected_beta_gx[..., 1] = (
+        beta_eta_combined[..., 1]
+        if changepoint_normal
+        else np.exp(beta_eta_combined[..., 1])
+    )
+    test_utils.assert_allclose(beta_gx, expected_beta_gx, rtol=1e-5)
+
     coefficients = np.broadcast_to(
         np.asarray(beta_gx)[:, :, np.newaxis, :], transformed.shape
     ).copy()
@@ -2948,7 +2977,7 @@ class TimeVaryingPosteriorTest(
         )
         * np.asarray(zeta)[:, 0, np.newaxis]
     )
-    if media_effects_dist == constants.MEDIA_EFFECTS_NORMAL:
+    if changepoint_normal:
       coefficients[..., 1] += time_effect[:, np.newaxis, :]
     else:
       coefficients[..., 1] *= np.exp(time_effect)[:, np.newaxis, :]

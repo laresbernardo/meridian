@@ -3742,6 +3742,13 @@ _PriorDistributionWithChangepoints = (
 )
 
 
+def _normal_prior() -> backend.tfd.Distribution:
+  """A prior that allows negative values."""
+  return backend.tfd.Normal(
+      backend.np_float_dtype(0.5), backend.np_float_dtype(1.0)
+  )
+
+
 class ChangepointsTest(
     test_utils.MeridianTestCase,
     model_test_data.WithInputDataSamples,
@@ -4034,6 +4041,145 @@ class ChangepointsTest(
         )
     )
     with self.assertRaisesRegex(ValueError, "media channels with changepoints"):
+      _ = model_context.prior_broadcast
+
+  def _national_context(
+      self,
+      prior: prior_distribution.PriorDistribution,
+      *,
+      rf: bool,
+      changepoint_media_effects_dist: str = constants.MEDIA_EFFECTS_LOG_NORMAL,
+      **spec_kwargs,
+  ) -> context.ModelContext:
+    """Builds a national model with changepoints on one media or RF channel."""
+    data = self.national_input_data_media_and_rf
+    channels = data.rf_channel if rf else data.media_channel
+    assert channels is not None
+    return self._context(
+        _ModelSpecWithChangepoints(
+            prior=prior,
+            changepoints={
+                str(channels.values[0]): [data.time_coordinates.all_dates[50]]
+            },
+            changepoint_media_effects_dist=changepoint_media_effects_dist,
+            **spec_kwargs,
+        ),
+        data=data,
+    )
+
+  def test_changepoint_media_effects_dist_applies_to_national_models(self):
+    model_context = self._national_context(
+        prior_distribution.PriorDistribution(), rf=False
+    )
+    self.assertEqual(
+        model_context.media_effects_dist, constants.MEDIA_EFFECTS_NORMAL
+    )
+    self.assertEqual(
+        model_context._changepoint_media_effects_dist,
+        constants.MEDIA_EFFECTS_LOG_NORMAL,
+    )
+
+  @parameterized.named_parameters(("media", False), ("rf", True))
+  def test_negative_prior_of_log_normal_channel_with_changepoints_raises(
+      self, rf: bool
+  ):
+    normal = _normal_prior()
+    if rf:
+      prior = prior_distribution.PriorDistribution(roi_rf=normal)
+      channel = self.national_input_data_media_and_rf.rf_channel
+    else:
+      prior = prior_distribution.PriorDistribution(roi_m=normal)
+      channel = self.national_input_data_media_and_rf.media_channel
+    assert channel is not None
+    with self.assertRaisesRegex(
+        ValueError,
+        re.escape(
+            "Media priors must have non-negative support when"
+            ' `changepoint_media_effects_dist`="log_normal"'
+        ),
+    ):
+      # Like `media_effects_dist`, the check only runs for an explicitly set
+      # `media_prior_type`.
+      self._national_context(
+          prior, rf=rf, media_prior_type=constants.TREATMENT_PRIOR_TYPE_ROI
+      )
+
+  def test_negative_prior_check_needs_explicit_prior_type(self):
+    # As for channels without changepoints, the default prior type doesn't
+    # turn the check on.
+    model_context = self._national_context(
+        prior_distribution.PriorDistribution(roi_m=_normal_prior()), rf=False
+    )
+    self.assertIsNotNone(model_context._media_changepoint_info)
+
+  def test_negative_prior_of_normal_channel_with_changepoints_is_allowed(
+      self,
+  ):
+    model_context = self._national_context(
+        prior_distribution.PriorDistribution(roi_m=_normal_prior()),
+        rf=False,
+        changepoint_media_effects_dist=constants.MEDIA_EFFECTS_NORMAL,
+        media_prior_type=constants.TREATMENT_PRIOR_TYPE_ROI,
+    )
+    self.assertIsNotNone(model_context._media_changepoint_info)
+
+  def _geo_context_with_roi_lower_bounds(
+      self, roi_lower_bounds: Sequence[float]
+  ) -> context.ModelContext:
+    """Builds a geo model whose normal channel `media[1]` has changepoints."""
+    roi_m = backend.tfd.Uniform(
+        low=np.asarray(roi_lower_bounds, dtype=backend.np_float_dtype),
+        high=np.ones(len(roi_lower_bounds), dtype=backend.np_float_dtype),
+    )
+    return self._context(
+        _ModelSpecWithChangepoints(
+            prior=prior_distribution.PriorDistribution(roi_m=roi_m),
+            changepoints={self.media[1]: [self.dates[50]]},
+            changepoint_media_effects_dist=constants.MEDIA_EFFECTS_NORMAL,
+            # The existing check only runs for an explicitly set prior type.
+            media_prior_type=constants.TREATMENT_PRIOR_TYPE_ROI,
+        )
+    )
+
+  def test_negative_prior_of_normal_channel_with_changepoints_in_geo_model(
+      self,
+  ):
+    lower_bounds = [0.0] * len(self.media)
+    lower_bounds[1] = -1.0
+    model_context = self._geo_context_with_roi_lower_bounds(lower_bounds)
+    self.assertEqual(
+        model_context.media_effects_dist, constants.MEDIA_EFFECTS_LOG_NORMAL
+    )
+
+  def test_negative_prior_of_log_normal_channel_without_changepoints_raises(
+      self,
+  ):
+    lower_bounds = [0.0] * len(self.media)
+    lower_bounds[0] = -1.0
+    with self.assertRaisesRegex(
+        ValueError, "Media priors must have non-negative support"
+    ):
+      self._geo_context_with_roi_lower_bounds(lower_bounds)
+
+  @parameterized.named_parameters(
+      ("log_normal", constants.MEDIA_EFFECTS_LOG_NORMAL),
+      ("normal", constants.MEDIA_EFFECTS_NORMAL),
+  )
+  def test_prior_length_mismatch_raises_custom_priors_error(
+      self, changepoint_media_effects_dist: str
+  ):
+    roi_m = backend.tfd.LogNormal(
+        np.zeros(len(self.media) - 1, dtype=backend.np_float_dtype), 1.0
+    )
+    model_context = self._context(
+        _ModelSpecWithChangepoints(
+            prior=prior_distribution.PriorDistribution(roi_m=roi_m),
+            changepoints={self.media[1]: [self.dates[50]]},
+            changepoint_media_effects_dist=changepoint_media_effects_dist,
+            media_prior_type=constants.TREATMENT_PRIOR_TYPE_ROI,
+        )
+    )
+    with self.assertRaisesRegex(ValueError, "Custom priors length"):
       _ = model_context.prior_broadcast
 
 

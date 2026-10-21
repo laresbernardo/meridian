@@ -536,6 +536,29 @@ def _mask_to_geo_holdout_specs(
   return geo_specs
 
 
+def _allows_negative_values(
+    prior: backend.tfd.Distribution, n_channels: int
+) -> np.ndarray | None:
+  """Returns whether a prior allows negative values, for each channel.
+
+  Args:
+    prior: A prior shared by all channels of a type, or with one value per
+      channel.
+    n_channels: The number of channels of the type.
+
+  Returns:
+    One boolean per channel, or `None` if the prior has a different number of
+    values than channels. Meridian reports that error when it sets up the
+    priors.
+  """
+  allows_negative = np.asarray(prior.cdf(0)) > 0
+  if np.ndim(allows_negative) == 0 or np.shape(allows_negative) == (
+      n_channels,
+  ):
+    return np.broadcast_to(allows_negative, (n_channels,))
+  return None
+
+
 def _changepoint_calibration_error(
     channels: Sequence[str], attribute: str
 ) -> ValueError:
@@ -1829,7 +1852,9 @@ class ModelContext:
     random effects follow a normal distribution. This check enforces that priors
     have non-negative support when random effects follow a log-normal
     distribution. This check only applies to geo-level models with log-normal
-    random effects since national models do not have random effects.
+    random effects since national models do not have random effects. Channels
+    with changepoints are checked with `changepoint_media_effects_dist`, which
+    also applies to national models.
     """
     prior = self._model_spec.prior
     if self.n_media_channels > 0:
@@ -1837,32 +1862,38 @@ class ModelContext:
           prior.roi_m,
           self.media_effects_dist,
           constants.TREATMENT_PRIOR_TYPE_ROI,
+          self._media_changepoint_info,
       )
       self._check_for_negative_support(
           prior.mroi_m,
           self.media_effects_dist,
           constants.TREATMENT_PRIOR_TYPE_MROI,
+          self._media_changepoint_info,
       )
       self._check_for_negative_support(
           prior.contribution_m,
           self.media_effects_dist,
           constants.TREATMENT_PRIOR_TYPE_CONTRIBUTION,
+          self._media_changepoint_info,
       )
     if self.n_rf_channels > 0:
       self._check_for_negative_support(
           prior.roi_rf,
           self.media_effects_dist,
           constants.TREATMENT_PRIOR_TYPE_ROI,
+          self._rf_changepoint_info,
       )
       self._check_for_negative_support(
           prior.mroi_rf,
           self.media_effects_dist,
           constants.TREATMENT_PRIOR_TYPE_MROI,
+          self._rf_changepoint_info,
       )
       self._check_for_negative_support(
           prior.contribution_rf,
           self.media_effects_dist,
           constants.TREATMENT_PRIOR_TYPE_CONTRIBUTION,
+          self._rf_changepoint_info,
       )
     if self.n_organic_media_channels > 0:
       self._check_for_negative_support(
@@ -1882,6 +1913,7 @@ class ModelContext:
       dist: backend.tfd.Distribution,
       media_effects_dist: str,
       prior_type: str,
+      changepoint_info: changepoints.ChangepointInfo | None = None,
   ) -> None:
     """Checks for negative support in prior distributions.
 
@@ -1894,21 +1926,53 @@ class ModelContext:
       dist: The distribution to check.
       media_effects_dist: The type of media effects distribution.
       prior_type: The prior type that corresponds with current prior under test.
+      changepoint_info: The channels of the type with changepoints, if any.
+        They are checked the same way, with `changepoint_media_effects_dist`
+        instead of `media_effects_dist`.
 
     Raises:
       ValueError: If the prior distribution has negative support when
       `media_effects_dist` is `MEDIA_EFFECTS_LOG_NORMAL`.
     """
-    if (
-        prior_type == self._model_spec.media_prior_type
-        and media_effects_dist == constants.MEDIA_EFFECTS_LOG_NORMAL
-        and np.any(dist.cdf(0) > 0)
-    ):
-      raise ValueError(
-          "Media priors must have non-negative support when"
-          f' `media_effects_dist`="{media_effects_dist}". Found negative prior'
-          f" distribution support for {dist.name}."
-      )
+    # Each check: the channels it applies to (all if `None`), their random
+    # effects distribution and its setting, and the prior type setting that
+    # turns the check on.
+    checks = [(
+        None,
+        media_effects_dist,
+        "media_effects_dist",
+        self._model_spec.media_prior_type,
+    )]
+    if changepoint_info is not None:
+      is_changepoint_channel = changepoint_info.is_changepoint_channel
+      checks = [
+          (~is_changepoint_channel, *checks[0][1:]),
+          (
+              is_changepoint_channel,
+              self._changepoint_media_effects_dist,
+              "changepoint_media_effects_dist",
+              self._model_spec.media_prior_type,
+          ),
+      ]
+    for channels, effects_dist, setting, set_prior_type in checks:
+      if (
+          prior_type != set_prior_type
+          or effects_dist != constants.MEDIA_EFFECTS_LOG_NORMAL
+      ):
+        continue
+      if channels is None:
+        negative = np.asarray(dist.cdf(0)) > 0
+      else:
+        negative = _allows_negative_values(dist, len(channels))
+        if negative is None:
+          return
+        negative = negative[channels]
+      if np.any(negative):
+        raise ValueError(
+            "Media priors must have non-negative support when"
+            f' `{setting}`="{effects_dist}". Found negative prior'
+            f" distribution support for {dist.name}."
+        )
 
   # --------------------------------------------------------------------------
   # Time-varying media effects.
@@ -1989,6 +2053,20 @@ class ModelContext:
             else declarative
         )
         raise _changepoint_calibration_error(channels, attribute)
+
+  @functools.cached_property
+  def _changepoint_media_effects_dist(self) -> str:
+    """The random effects distribution of the channels with changepoints.
+
+    Unlike `media_effects_dist`, it also applies to national models.
+    """
+    # TODO: Read `self._model_spec.changepoint_media_effects_dist`
+    # directly once it moves to `ModelSpec`.
+    return getattr(
+        self._model_spec,
+        "changepoint_media_effects_dist",
+        constants.MEDIA_EFFECTS_LOG_NORMAL,
+    )
 
   @functools.cached_property
   def _changepoint_max_intervals(self) -> int:
