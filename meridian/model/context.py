@@ -710,6 +710,7 @@ class ModelContext:
     self._validate_mroi_priors_non_revenue()
     self._validate_roi_priors_non_revenue()
     self._check_media_prior_support()
+    self._check_changepoint_prior_types()
     self._validate_geo_invariants()
     self._validate_time_invariants()
     self._validate_media_spend_for_paid_channels()
@@ -1951,7 +1952,10 @@ class ModelContext:
               is_changepoint_channel,
               self._changepoint_media_effects_dist,
               "changepoint_media_effects_dist",
-              self._model_spec.media_prior_type,
+              # Like `media_prior_type` above, also for RF channels.
+              # TODO: Read the field directly once it moves to
+              # `ModelSpec`.
+              getattr(self._model_spec, "changepoint_media_prior_type", None),
           ),
       ]
     for channels, effects_dist, setting, set_prior_type in checks:
@@ -2067,6 +2071,49 @@ class ModelContext:
         "changepoint_media_effects_dist",
         constants.MEDIA_EFFECTS_LOG_NORMAL,
     )
+
+  def _changepoint_prior_type(self, is_rf: bool) -> str:
+    """The prior type of the paid media or RF channels with changepoints."""
+    # TODO: Read the fields of `self._model_spec` directly once
+    # they move to `ModelSpec`.
+    return getattr(
+        self._model_spec,
+        "changepoint_rf_prior_type"
+        if is_rf
+        else "changepoint_media_prior_type",
+        constants.TREATMENT_PRIOR_TYPE_ROI,
+    )
+
+  def _check_changepoint_prior_types(self) -> None:
+    """Checks that channels with changepoints use their type's prior type.
+
+    Raises:
+      NotImplementedError: If the paid media or RF channels with changepoints
+        use another prior type than `media_prior_type` or `rf_prior_type`.
+    """
+    # TODO: Sample models whose channels with changepoints use
+    # another prior type.
+    for is_rf, changepoint_info, prior_type in (
+        (
+            False,
+            self._media_changepoint_info,
+            self._model_spec.effective_media_prior_type,
+        ),
+        (
+            True,
+            self._rf_changepoint_info,
+            self._model_spec.effective_rf_prior_type,
+        ),
+    ):
+      changepoint_prior_type = self._changepoint_prior_type(is_rf)
+      if changepoint_info is not None and changepoint_prior_type != prior_type:
+        name = "rf" if is_rf else "media"
+        raise NotImplementedError(
+            f"`changepoint_{name}_prior_type` ({changepoint_prior_type!r})"
+            f" must equal `{name}_prior_type` ({prior_type!r}). A different"
+            " prior type for the channels with `changepoints` is not supported"
+            " yet."
+        )
 
   @functools.cached_property
   def _changepoint_max_intervals(self) -> int:
